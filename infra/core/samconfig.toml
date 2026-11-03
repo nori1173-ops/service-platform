@@ -1,0 +1,27 @@
+version = 0.1
+
+[default.build.parameters]
+use_container = true
+
+[default.deploy.parameters]
+stack_name = "service-platform-core-dev"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-core-dev"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+tags = "Project=service-platform App=core Env=dev"
+parameter_overrides = "ProjectName=service-platform Env=dev LogLevel=DEBUG SharedLayerArn=/service-platform/dev/shared/layer-arn MailDomain=service-platform-dev.example-cloud.com CognitoEmailSendingAccount=DEVELOPER HostedZoneId=Z0EXAMPLEZONE0 ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 OpsEmail=devA@example.co.jp"
+
+[production.build.parameters]
+use_container = true
+
+[production.deploy.parameters]
+stack_name = "service-platform-core-prod"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-core-prod"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+tags = "Project=service-platform App=core Env=prod"
+parameter_overrides = "ProjectName=service-platform Env=prod LogLevel=INFO SharedLayerArn=/service-platform/prod/shared/layer-arn MailDomain=service-platform.example-cloud.com CognitoEmailSendingAccount=DEVELOPER HostedZoneId=Z0EXAMPLEZONE0 ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 OpsEmail=devA@example.co.jp"

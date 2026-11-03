@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: service-platform edge - SPA バケット / OAC / CloudFront / Route53 / 標準ログ。CloudFront Function は SPA フォールバックだけを行う
+
+# 前提: OriginVerifySecret は scripts/init-secrets.sh が SSM に登録した値を
+# scripts/deploy-edge.sh が復号取得して --parameter-overrides で渡す。
+# 各アプリの {App}ApiDomain も同スクリプトが SSM /service-platform/{env}/apps/{app}/api-domain
+# から読んで渡す。未指定なら API origin / behavior を作らないので app 未デプロイでも edge は立つ。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: service-platform
+  Env:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+  SiteDomain:
+    Type: String
+    Default: service-platform-dev.example-cloud.com
+    Description: サイトの FQDN。prod は samconfig で上書きする
+  HostedZoneId:
+    Type: String
+    Default: Z0EXAMPLEZONE0
+    Description: example-cloud.com の既存共有ホストゾーン ID。レコードの新規追加のみ行う
+  AcmCertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:210000000001:certificate/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    Description: 既存の共有 ACM 証明書（*.example-cloud.com、us-east-1）。新規発行はしない
+  OriginVerifySecret:
+    Type: String
+    NoEcho: true
+    Description: CloudFront から API origin へ渡す共有秘密。deploy-edge.sh が SSM から渡す
+  AdminUsersApiDomain:
+    Type: String
+    Default: ""
+    Description: admin-users の HTTP API ドメイン。空なら API 経路を作らない
+
+Conditions:
+  HasAdminUsersApi: !Not [!Equals [!Ref AdminUsersApiDomain, ""]]
+
+Resources:
+  SpaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-spa-${Env}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Bucket
+
+  SpaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SpaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SpaBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  CloudFrontLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-cf-logs-${Env}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # レガシー標準ログの配信は配信先バケットへの ACL 書き込みを要求するため、
+      #  BucketOwnerEnforced に対する唯一の例外としてここだけ ACL を有効にする。
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireCloudFrontLogs
+            Status: Enabled
+            ExpirationInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Bucket
+
+  # AWS 管理の Managed-SecurityHeadersPolicy は CSP を持たない。Amplify がトークンを
+  # localStorage に置くため、XSS 1 件でトークンごと持ち出されないよう自前で持つ。
+  # 依存はすべてローカル配信（外部 CDN / Google Fonts を使わない）なので 'self' 中心で組める。
+  # style-src の 'unsafe-inline' は Vuetify のインラインスタイル属性のために外せない。
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${ProjectName}-security-headers-${Env}'
+        Comment: SPA 向けのセキュリティヘッダ（CSP + HSTS + nosniff + Referrer-Policy）
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: !Sub >-
+              default-src 'self';
+              script-src 'self';
+              style-src 'self' 'unsafe-inline';
+              img-src 'self' data: blob:;
+              font-src 'self' data:;
+              connect-src 'self' https://cognito-idp.${AWS::Region}.amazonaws.com;
+              frame-ancestors 'none';
+              base-uri 'self';
+              object-src 'none';
+              form-action 'self'
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            Override: true
+            FrameOption: DENY
+          ReferrerPolicy:
+            Override: true
+            ReferrerPolicy: strict-origin-when-cross-origin
+          StrictTransportSecurity:
+            Override: true
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            # preload は example-cloud.com 全体に効くため付けない
+            Preload: false
+
+  Oac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectName}-oac-${Env}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SpaFallbackFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${ProjectName}-spa-fallback-${Env}'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: SPA fallback for service-platform
+        Runtime: cloudfront-js-2.0
+      # 正本は infra/edge/functions/spa-fallback.js。tests/infra/test_edge_template.py が
+      # 一致を検査するので、直すときは .js 側を直してここへ貼り直す。
+      FunctionCode: |
+        // infra/edge/functions/spa-fallback.js（正本。直したらテンプレートの FunctionCode に貼り直す）
+        function handler(event) {
+          var req = event.request;
+          if (!req.uri.startsWith('/api/') && !req.uri.includes('.')) {
+            req.uri = '/index.html';
+          }
+          return req;
+        }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: EdgeFunction
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${ProjectName}-${Env}'
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        IPV6Enabled: false
+        Aliases:
+          - !Ref SiteDomain
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Logging:
+          Bucket: !Sub '${CloudFrontLogBucket}.s3.amazonaws.com'
+          IncludeCookies: false
+          Prefix: cloudfront/
+        Origins:
+          - Id: spa
+            DomainName: !GetAtt SpaBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt Oac.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - !If
+            - HasAdminUsersApi
+            - Id: api-admin-users
+              DomainName: !Ref AdminUsersApiDomain
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols:
+                  - TLSv1.2
+              OriginCustomHeaders:
+                - HeaderName: x-origin-verify
+                  HeaderValue: !Ref OriginVerifySecret
+            - !Ref AWS::NoValue
+        DefaultCacheBehavior:
+          TargetOriginId: spa
+          ViewerProtocolPolicy: https-only
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+          Compress: true
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaFallbackFunction.FunctionARN
+        # アプリを足すときはここへ behavior を 1 本追加する。条件は origin と同じく
+        # 「要素ごとの - !If」で付ける（リスト全体を !If にすると、後から足した behavior が
+        # 他アプリの Condition に巻き込まれて丸ごと消える）。
+        CacheBehaviors:
+          - !If
+            - HasAdminUsersApi
+            - PathPattern: /api/admin-users/*
+              TargetOriginId: api-admin-users
+              ViewerProtocolPolicy: https-only
+              AllowedMethods:
+                - GET
+                - HEAD
+                - OPTIONS
+                - PUT
+                - PATCH
+                - POST
+                - DELETE
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              Compress: true
+            - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Distribution
+
+  DnsRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref SiteDomain
+          Type: A
+          AliasTarget:
+            HostedZoneId: Z2FDTNDATAQYW2
+            DNSName: !GetAtt Distribution.DomainName
+
+Outputs:
+  DistributionId:
+    Description: CloudFront ディストリビューション ID（キャッシュ無効化に使う）
+    Value: !Ref Distribution
+  DistributionDomainName:
+    Description: CloudFront のドメイン名
+    Value: !GetAtt Distribution.DomainName
+  SpaBucketName:
+    Description: SPA ビルド成果物の同期先バケット
+    Value: !Ref SpaBucket
+  SiteUrl:
+    Description: サイト URL
+    Value: !Sub 'https://${SiteDomain}'

@@ -1,0 +1,28 @@
+version = 0.1
+
+[default.build.parameters]
+use_container = true
+
+[default.deploy.parameters]
+stack_name = "service-platform-app-{{cookiecutter.app_id}}-dev"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-app-{{cookiecutter.app_id}}-dev"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+tags = "Project=service-platform App={{cookiecutter.app_id}} Env=dev"
+parameter_overrides = "ProjectName=service-platform Env=dev LogLevel=DEBUG ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/dev/cognito/issuer UserPoolClientId=/service-platform/dev/cognito/client-id NotifyQueueUrl=/service-platform/dev/notify/queue-url NotifyQueueArn=/service-platform/dev/notify/queue-arn AttachmentsBucket=/service-platform/dev/attachments/bucket SharedLayerArn=/service-platform/dev/shared/layer-arn"
+
+[production.build.parameters]
+use_container = true
+
+# prod で上書きするのは SSM の「キー名」であり、値ではない。
+[production.deploy.parameters]
+stack_name = "service-platform-app-{{cookiecutter.app_id}}-prod"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-app-{{cookiecutter.app_id}}-prod"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+tags = "Project=service-platform App={{cookiecutter.app_id}} Env=prod"
+parameter_overrides = "ProjectName=service-platform Env=prod LogLevel=INFO ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/prod/cognito/issuer UserPoolClientId=/service-platform/prod/cognito/client-id NotifyQueueUrl=/service-platform/prod/notify/queue-url NotifyQueueArn=/service-platform/prod/notify/queue-arn AttachmentsBucket=/service-platform/prod/attachments/bucket SharedLayerArn=/service-platform/prod/shared/layer-arn"

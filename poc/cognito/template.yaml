@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SERVICE-PLATFORM Cognito PoC . Disposable stack for ADR-001 PoC items 1-14. Delete after use.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: service-platform
+  RpId:
+    Type: String
+    Default: localhost
+    Description: WebAuthn relying party ID. localhost for the local static page.
+  SesDomain:
+    Type: String
+    Default: ses-sender-dev.example-cloud.com
+    Description: Verified SES domain identity in this account and region (sender).
+  ChangePasswordRuleAction:
+    Type: String
+    Default: Count
+    AllowedValues: [Count, Block]
+    Description: Action of the user pool web ACL rule that matches ChangePassword (PoC 14).
+
+Conditions:
+  BlockChangePassword: !Equals [!Ref ChangePasswordRuleAction, Block]
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: INACTIVE
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+        SignInPolicy:
+          AllowedFirstAuthFactors: [PASSWORD, EMAIL_OTP, WEB_AUTHN]
+      WebAuthnRelyingPartyID: !Ref RpId
+      WebAuthnUserVerification: required
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        SourceArn: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesDomain}
+        From: !Sub "SERVICE-PLATFORM PoC <no-reply@${SesDomain}>"
+      UserPoolTags:
+        Project: !Ref ProjectName
+        Name: PoC
+
+  WebClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: poc-web
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_AUTH, ALLOW_REFRESH_TOKEN_AUTH, ALLOW_USER_SRP_AUTH]
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 1440
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: minutes
+      AuthSessionValidity: 10
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      ReadAttributes: [email, email_verified, name]
+      WriteAttributes: [name]
+
+  RotationClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: poc-web-rotation
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_AUTH]
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 1440
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: minutes
+      AuthSessionValidity: 10
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      ReadAttributes: [email, email_verified, name]
+      WriteAttributes: [name]
+      RefreshTokenRotation:
+        Feature: ENABLED
+        RetryGracePeriodSeconds: 0
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admin
+
+  UserPoolWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${AWS::StackName}-userpool
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}-userpool
+      Rules:
+        - Name: change-password
+          Priority: 0
+          Action: !If
+            - BlockChangePassword
+            - Block: {}
+            - Count: {}
+          Statement:
+            ByteMatchStatement:
+              FieldToMatch:
+                SingleHeader:
+                  Name: x-amz-target
+              PositionalConstraint: EXACTLY
+              SearchString: AWSCognitoIdentityProviderService.ChangePassword
+              TextTransformations:
+                - Priority: 0
+                  Type: NONE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: change-password
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: PoC
+
+  UserPoolWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt UserPool.Arn
+      WebACLArn: !GetAtt UserPoolWebAcl.Arn
+
+Outputs:
+  Region:
+    Value: !Ref AWS::Region
+  UserPoolId:
+    Value: !Ref UserPool
+  WebClientId:
+    Value: !Ref WebClient
+  RotationClientId:
+    Value: !Ref RotationClient
+  RpId:
+    Value: !Ref RpId
+  WebAclName:
+    Value: !Sub ${AWS::StackName}-userpool
+  ChangePasswordRuleAction:
+    Value: !Ref ChangePasswordRuleAction

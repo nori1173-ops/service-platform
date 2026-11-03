@@ -1,0 +1,32 @@
+%%{init: {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "themeVariables": {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "fontSize": "16px"}, "sequence": {"actorFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "messageFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "noteFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 16, "actorMargin": 24, "noteMargin": 8, "messageMargin": 30}, "flowchart": {"htmlLabels": true, "wrappingWidth": 460}}}%%
+sequenceDiagram
+    autonumber
+    participant B as ブラウザ (SPA)
+    participant CF as CloudFront + WAF
+    participant API as HTTP API (JWT authorizer)
+    participant L as Lambda (shared レイヤ)
+    participant T as 台帳
+    participant A as 監査テーブル
+    B->>CF: 要求 (ID トークン)
+    Note over CF: WAF のレート制限
+    CF->>API: 転送 (x-origin-verify)
+    Note over API: 署名・期限・iss・aud<br>無効なら 401
+    API->>L: クレーム
+    Note over L: x-origin-verify<br>と token_use
+    L->>T: sub → user_id
+    T-->>L: 利用者の状態 (停止なら 403)
+    opt 通信機を伴う API
+        L->>T: 稼働中の通信機の利用期間 P<br>と P での自分の割り当て (期間内)
+        L->>T: ログイン記録 (同じ割り当て<br>valid_from 以後、12 時間)
+    end
+    opt サービスの API
+        L->>T: サービスの許可 (P、期間内)
+    end
+    opt admin の API
+        L->>T: admin の状態が「有効」か
+        Note over L: TOTP の設定と<br>TOTP を通ったセッションか<br>(ADR D9)
+    end
+    Note over L,T: どれか欠ければ 403
+    L->>L: 処理
+    L->>A: 追記 (user_id)
+    L-->>B: 応答

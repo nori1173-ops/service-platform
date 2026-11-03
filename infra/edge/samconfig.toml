@@ -1,0 +1,21 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "service-platform-edge-dev"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-edge-dev"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+tags = "Project=service-platform App=edge Env=dev"
+parameter_overrides = "ProjectName=service-platform Env=dev SiteDomain=service-platform-dev.example-cloud.com HostedZoneId=Z0EXAMPLEZONE0 AcmCertificateArn=arn:aws:acm:us-east-1:210000000001:certificate/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+[production.deploy.parameters]
+stack_name = "service-platform-edge-prod"
+region = "ap-northeast-1"
+s3_bucket = "example-sam-ap-northeast-1"
+s3_prefix = "service-platform-edge-prod"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+tags = "Project=service-platform App=edge Env=prod"
+parameter_overrides = "ProjectName=service-platform Env=prod SiteDomain=service-platform.example-cloud.com HostedZoneId=Z0EXAMPLEZONE0 AcmCertificateArn=arn:aws:acm:us-east-1:210000000001:certificate/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

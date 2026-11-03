@@ -1,0 +1,13 @@
+%%{init: {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "themeVariables": {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "fontSize": "16px"}, "sequence": {"actorFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "messageFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "noteFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 16}, "flowchart": {"htmlLabels": true, "wrappingWidth": 460}}}%%
+flowchart TD
+    signin["サインイン<br>お客様と社員 (admin 以外): パスキー<br>(初回と回復はメールのコード)<br>admin: パスワード + TOTP"]
+    choice(["入り方の選択"])
+    device["通信機ログイン<br>通信機アカウント・製造番号・暗証番号<br>割り当てられた通信機だけ (D4)"]
+    services["許可されたサービスの一覧"]
+    camera["サービス例（公開対象外）<br>/camera/ の別ビルド (D6)"]
+    account["アカウントの画面 (D5)<br>パスキーの管理 (1 人で複数。D1)<br>割り当てと許可の一覧<br>admin は利用者の管理・割り当て・許可・TOTP の登録"]
+    signin --> choice
+    choice -->|通信機単位| device
+    device --> services
+    services --> camera
+    choice -->|アカウント単位| account

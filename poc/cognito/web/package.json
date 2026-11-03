@@ -1,0 +1,16 @@
+{
+  "name": "service-platform-poc-cognito-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/poc.js --bundle --format=iife --platform=browser --target=es2020 --outfile=site/poc.js && esbuild src/camera.js --bundle --format=iife --platform=browser --target=es2020 --outfile=site/camera/camera.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "3.1161.0",
+    "aws-amplify": "6.20.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
