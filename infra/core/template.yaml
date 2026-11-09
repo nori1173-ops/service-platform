@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: service-platform core - Cognito / SES / 通知キュー / notifier / 添付バケットと cognito・notify・attachments の SSM の取り決めパラメータ
+Description: service-platform core - Cognito (ユーザープールと web ACL) / 台帳と監査のテーブル / SES / 通知キュー / notifier / 添付バケットと、それらを渡す SSM パラメータ
 
 # 前提: shared スタックが先にデプロイ済みであること（SSM /service-platform/{env}/shared/layer-arn を読む）
 
@@ -52,9 +52,19 @@ Parameters:
       - DEVELOPER
     Default: COGNITO_DEFAULT
     Description: >-
-      Cognito のメール送信元。DEVELOPER は SES Identity が検証済みでないと
+      Cognito のメール送信元（設計 6.4）。DEVELOPER は SES Identity が検証済みでないと
       デプロイに失敗するため、新規スタックは COGNITO_DEFAULT で立ち上げ、DNS 検証後に
-      samconfig を DEVELOPER にして再デプロイする
+      samconfig を DEVELOPER にして再デプロイする。サインインの要素 EMAIL_OTP も
+      DEVELOPER のときだけ入れる（SES の送信が前提のため）
+  SiteDomain:
+    Type: String
+    Default: service-platform-dev.example-cloud.com
+    Description: サイトの FQDN。パスキーの RP ID と招待メールのリンクに使う。RP ID は後から変えない (dev service-platform-dev.example-cloud.com / prod service-platform.example-cloud.com)
+  UserPoolRateLimit:
+    Type: Number
+    Default: 300
+    MinValue: 10
+    Description: ユーザープールの web ACL で IP ごとの要求の上限 (5 分あたり)。超過要求を遮断する
 
 Conditions:
   IsProd: !Equals [!Ref Env, prod]
@@ -73,7 +83,10 @@ Globals:
       Name: Function
 
 Resources:
-  UserPool:
+  # 旧プール (論理 ID UserPool) は email を必須で作っており、必須かどうかは作成後に変えられない。
+  # 論理 ID を替えてプールを作り直させた（計画の判断 1）。この ID をまた替えるとプールが作り直され、
+  # 利用者・パスキー・クライアント ID が全部変わる（設計 4.1 の弱参照の注意）。
+  SignInUserPool:
     Type: AWS::Cognito::UserPool
     UpdateReplacePolicy: Retain
     # DEVELOPER でのメール送信は SES Identity を参照するため、Identity より後に作る。
@@ -82,12 +95,12 @@ Resources:
       cfn-lint:
         config:
           # 置換を伴う更新からだけ守る。スタック削除時は dev の後片付けのため消す
-          # （prod は DeletionProtection: ACTIVE が削除そのものを止める）
+          # （prod は DeletionProtection: ACTIVE が削除そのものを止める。設計 6.4）
           ignore_checks:
             - W3011
     Properties:
       UserPoolName: !Sub ${ProjectName}-${Env}
-      UserPoolTier: LITE
+      UserPoolTier: ESSENTIALS
       DeletionProtection: !If [IsProd, ACTIVE, INACTIVE]
       UsernameAttributes:
         - email
@@ -95,37 +108,56 @@ Resources:
         CaseSensitive: false
       AutoVerifiedAttributes:
         - email
+      # 必須の属性はどのクライアントからも書けるので、email を必須にしない（ADR D2）
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
       AdminCreateUserConfig:
-        AllowAdminCreateUserOnly: false
+        AllowAdminCreateUserOnly: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
       Policies:
+        # パスワードを持つのは admin だけ。一時パスワードは社内の別経路で渡す（計画 3 章）
         PasswordPolicy:
-          MinimumLength: 8
+          MinimumLength: 12
           RequireUppercase: true
           RequireLowercase: true
           RequireNumbers: true
           RequireSymbols: false
+          TemporaryPasswordValidityDays: 3
+        SignInPolicy:
+          AllowedFirstAuthFactors: !If
+            - UseSesForCognitoEmail
+            - - PASSWORD
+              - WEB_AUTHN
+              - EMAIL_OTP
+            - - PASSWORD
+              - WEB_AUTHN
+      WebAuthnRelyingPartyID: !Ref SiteDomain
+      WebAuthnUserVerification: required
+      WebAuthnFactorConfiguration: MULTI_FACTOR_WITH_USER_VERIFICATION
       MfaConfiguration: OPTIONAL
       EnabledMfas:
         - SOFTWARE_TOKEN_MFA
       # COGNITO_DEFAULT で独自 From を使うには SES の送信認可ポリシーが別途要るため、
-      # 切替前は既定の no-reply@verificationemail.com のままにする。
+      # 切替前は既定の no-reply@verificationemail.com のままにする（設計 6.4）。
       EmailConfiguration: !If
         - UseSesForCognitoEmail
         - EmailSendingAccount: DEVELOPER
-          From: !Sub noreply@${MailDomain}
+          From: !Sub SERVICE-PLATFORM <noreply@${MailDomain}>
           SourceArn: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${MailDomain}
           ConfigurationSet: !Ref SesConfigurationSet
         - EmailSendingAccount: COGNITO_DEFAULT
-      AccountRecoverySetting:
-        RecoveryMechanisms:
-          - Name: verified_email
-            Priority: 1
-      Schema:
-        - Name: email
-          Required: true
-          Mutable: true
       LambdaConfig:
         PreSignUp: !GetAtt PreSignUpFunction.Arn
+        CustomMessage: !GetAtt CustomMessageFunction.Arn
       UserPoolTags:
         Project: !Ref ProjectName
         Name: UserPool
@@ -134,33 +166,47 @@ Resources:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       ClientName: !Sub ${ProjectName}-spa-${Env}
-      UserPoolId: !Ref UserPool
+      UserPoolId: !Ref SignInUserPool
       GenerateSecret: false
+      # admin のパスワードも USER_AUTH (PASSWORD_SRP) で入るので ALLOW_USER_SRP_AUTH は要らない（計画の判断 6）。
+      # rotation と ALLOW_REFRESH_TOKEN_AUTH は併用できない（ADR 判断 14）
       ExplicitAuthFlows:
-        - ALLOW_USER_SRP_AUTH
-        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_AUTH
       PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AuthSessionValidity: 10
       IdTokenValidity: 60
       AccessTokenValidity: 60
-      RefreshTokenValidity: 8
+      RefreshTokenValidity: 1440
       TokenValidityUnits:
         IdToken: minutes
         AccessToken: minutes
-        RefreshToken: hours
+        RefreshToken: minutes
+      RefreshTokenRotation:
+        Feature: ENABLED
+        RetryGracePeriodSeconds: 30
+      # 利用者に email と email_verified を書かせない（ADR D2）。Cognito は書ける属性が
+      # 読める属性に含まれないクライアントを作らないので、読める属性に name も入れる
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+      WriteAttributes:
+        - name
 
   AdminGroup:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: admin
-      UserPoolId: !Ref UserPool
-      Description: ユーザー管理とアプリ設定の編集を許可する管理者グループ
+      UserPoolId: !Ref SignInUserPool
+      Description: 利用者の管理と許可の台帳の操作を許す管理者グループ。TOTP と別経路の確認を経て有効にする
       Precedence: 1
 
   PreSignUpFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${ProjectName}-core-pre-signup-${Env}
-      Description: サインアップを @example.co.jp のメールアドレスだけに制限する
+      Description: 招待 (AdminCreateUser) 以外からの利用者の作成を拒む
       CodeUri: src/pre_signup/
       Handler: app.handler
 
@@ -181,14 +227,254 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !GetAtt PreSignUpFunction.Arn
       Principal: cognito-idp.amazonaws.com
-      SourceArn: !GetAtt UserPool.Arn
+      SourceArn: !GetAtt SignInUserPool.Arn
+
+  CustomMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-core-custom-message-${Env}
+      Description: 招待とメールのコードの文面を日本語にする
+      CodeUri: src/custom_message/
+      Handler: app.handler
+      Environment:
+        Variables:
+          SITE_URL: !Sub https://${SiteDomain}/
+
+  CustomMessageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CustomMessageFunction}
+      RetentionInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: LogGroup
+
+  CustomMessagePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CustomMessageFunction.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt SignInUserPool.Arn
+
+  # ユーザープールの公開 API の前に置く web ACL（ADR D9、判断 15）
+  UserPoolWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${ProjectName}-userpool-${Env}
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-userpool-${Env}
+      Rules:
+        # お客様のパスワードの後付けを止める。admin の招待・TOTP の登録・AdminSetUserPassword は通る（PoC 14）
+        - Name: change-password
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            ByteMatchStatement:
+              FieldToMatch:
+                SingleHeader:
+                  Name: x-amz-target
+              PositionalConstraint: EXACTLY
+              SearchString: AWSCognitoIdentityProviderService.ChangePassword
+              TextTransformations:
+                - Priority: 0
+                  Type: NONE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: change-password
+        - Name: rate-per-ip
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref UserPoolRateLimit
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-per-ip
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: WebAcl
+
+  UserPoolWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt SignInUserPool.Arn
+      WebACLArn: !GetAtt UserPoolWebAcl.Arn
+
+  # WAF のログのロググループ名は aws-waf-logs- で始める必要がある
+  UserPoolWebAclLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub aws-waf-logs-${ProjectName}-userpool-${Env}
+      RetentionInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: LogGroup
+
+  UserPoolWebAclLogging:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt UserPoolWebAcl.Arn
+      # WAF は GetAtt の Arn (末尾 :*) を受け付けないので組み立てる
+      LogDestinationConfigs:
+        - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UserPoolWebAclLogGroup}
+      # WAF の対象アクションに一致した要求を記録する
+      LoggingFilter:
+        DefaultBehavior: DROP
+        Filters:
+          - Behavior: KEEP
+            Requirement: MEETS_ANY
+            Conditions:
+              - ActionCondition:
+                  Action: BLOCK
+              - ActionCondition:
+                  Action: COUNT
+
+  # 土台の台帳（ADR D4、計画 2.1）。請求の実績の基礎なので dev も Retain
+  LedgerTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ${ProjectName}-core-ledger-${Env}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      # 一覧の画面のためだけに使う（結果整合で足りるもの）。認可の判断には使わない
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Table
+
+  # 監査（ADR D12、計画 2.2）。各サービスには PutItem だけを渡す
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ${ProjectName}-core-audit-${Env}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # 通信機アカウントで引く
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # 日ごとに時系列で引く
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      # 操作の記録は 365 日。請求の実績の基礎になる記録には ttl を付けない
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Table
+
+  LedgerTableNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${ProjectName}/${Env}/ledger/table-name
+      Type: String
+      Value: !Ref LedgerTable
+      Description: 台帳のテーブル名。台帳を読み書きするサービスと運用スクリプトが読む（設計 4.2）
+
+  AuditTableNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${ProjectName}/${Env}/audit/table-name
+      Type: String
+      Value: !Ref AuditTable
+      Description: 監査のテーブル名。全サービス (PutItem だけ) と運用スクリプトが読む（設計 4.2）
 
   UserPoolIdParameter:
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /${ProjectName}/${Env}/cognito/user-pool-id
       Type: String
-      Value: !Ref UserPool
+      Value: !Ref SignInUserPool
       Description: User Pool ID。frontend のビルドと運用スクリプトが読む
 
   UserPoolClientIdParameter:
@@ -204,7 +490,7 @@ Resources:
     Properties:
       Name: !Sub /${ProjectName}/${Env}/cognito/issuer
       Type: String
-      Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+      Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${SignInUserPool}
       Description: app の JWT authorizer が検証する issuer
 
   NotifyQueue:
@@ -376,15 +662,6 @@ Resources:
             TagFilters:
               - Key: lifecycle
                 Value: expire
-          # 中間ファイル（parts/ と tenants.json）は照合履歴として残す対象ではない。
-          # キーが {app}/{target_env}/{YYYY}/{MM}/... で月が途中に入りプレフィックスでは
-          # 選べないため、書き手が lifecycle=expire-90 タグを付ける。
-          - Id: ExpireIntermediateArtifacts
-            Status: Enabled
-            ExpirationInDays: 90
-            TagFilters:
-              - Key: lifecycle
-                Value: expire-90
           - Id: ExpireNoncurrentVersions
             Status: Enabled
             NoncurrentVersionExpiration:
@@ -595,7 +872,7 @@ Resources:
 Outputs:
   UserPoolId:
     Description: Cognito User Pool ID
-    Value: !Ref UserPool
+    Value: !Ref SignInUserPool
   UserPoolClientId:
     Description: SPA 用 App Client ID
     Value: !Ref UserPoolClient

@@ -17,8 +17,6 @@ export function configureAmplify(): void {
         userPoolId,
         userPoolClientId,
         loginWith: { email: true },
-        signUpVerificationMethod: 'code',
-        userAttributes: { email: { required: true } },
       },
     },
   })

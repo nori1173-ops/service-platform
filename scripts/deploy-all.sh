@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# 全スタックを依存順にデプロイする。
+# 全スタックを依存順にデプロイする（DESIGN 3.3 / 13.3。初回の SES 検証・Ops 購読・admin 作成は RUNBOOK の段階手順）。
 #
 # 使い方:
 #   scripts/deploy-all.sh dev
 #   scripts/deploy-all.sh prod
 #
-# 順序: shared -> core -> apps/* -> edge -> frontend
-#   core が SSM /shared/layer-arn を読むため shared を先に流す。
+# 順序: shared -> core -> waf -> apps/* -> edge -> frontend
 set -euo pipefail
 
 REGION="${AWS_REGION:-ap-northeast-1}"
@@ -66,6 +65,7 @@ echo "  Profile : ${AWS_PROFILE:-(未設定。既定プロファイルを使う)
 
 deploy_stack "shared" "${ROOT}/shared"
 deploy_stack "core" "${ROOT}/infra/core"
+"${ROOT}/scripts/deploy-waf.sh" "${ENV_NAME}"
 
 shopt -s nullglob
 for app_dir in "${ROOT}"/apps/*/; do
@@ -87,6 +87,11 @@ echo "=============================================="
 echo "  frontend"
 echo "=============================================="
 "${ROOT}/scripts/deploy-frontend.sh" "${ENV_NAME}"
+
+echo ""
+echo "=============================================="
+echo "  camera の SPA (/camera/)"
+echo "=============================================="
 
 echo ""
 echo "一括デプロイ完了 (${ENV_NAME})"

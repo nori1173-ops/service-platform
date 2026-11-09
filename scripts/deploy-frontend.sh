@@ -7,6 +7,7 @@
 #
 # Cognito の ID は SSM から、バケット名とディストリビューション ID は edge スタックの
 # Outputs から取る（人が値をコピーしない）。
+# （--delete で消さない。DESIGN 17.2 #11）。
 set -euo pipefail
 
 PROJECT="service-platform"
@@ -112,7 +113,6 @@ if [ ! -f "${FRONTEND_DIR}/dist/index.html" ]; then
 fi
 
 if [ "${ENV_NAME}" = "prod" ]; then
-  if ! confirm "prod の s3://${SPA_BUCKET}/ を dist/ の内容で同期します（--delete で不要ファイルを削除）。続行しますか?"; then
     echo "中止しました。"
     exit 1
   fi
@@ -120,9 +120,9 @@ fi
 
 echo ""
 echo "--- s3 sync ---"
-aws s3 sync "${FRONTEND_DIR}/dist/" "s3://${SPA_BUCKET}/" --delete --region "${REGION}"
 
 # index.html はキャッシュさせない（SPA のエントリポイント）。
+aws s3 sync "${FRONTEND_DIR}/dist/" "s3://${SPA_BUCKET}/" --delete --region "${REGION}"
 aws s3 cp "${FRONTEND_DIR}/dist/index.html" "s3://${SPA_BUCKET}/index.html" \
   --cache-control no-cache --content-type text/html --region "${REGION}"
 

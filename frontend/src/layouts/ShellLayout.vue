@@ -5,11 +5,13 @@ import { useDisplay } from 'vuetify'
 import { apps } from '@/apps/registry'
 import { SITE_ENV_COLORS, SITE_ENV_LABELS, siteEnv } from '@/config/site'
 import { useAuthStore } from '@/stores/auth'
+import { useMeStore } from '@/stores/me'
 import { useUiStore } from '@/stores/ui'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const me = useMeStore()
 const ui = useUiStore()
 const { mdAndUp } = useDisplay()
 
@@ -26,7 +28,10 @@ function allowed(requiredGroups?: string[]): boolean {
   return !requiredGroups?.length || requiredGroups.some((group) => auth.groups.includes(group))
 }
 
-const visibleApps = computed(() => apps.filter((app) => allowed(app.requiredGroups)))
+// 停止中・admin の準備中 / 確認待ちはアカウントの画面だけを使う (ガードと同じ判定)
+const visibleApps = computed(() =>
+  me.restricted ? [] : apps.filter((app) => allowed(app.requiredGroups)),
+)
 
 // dev サイトと本番サイトの取り違えを防ぐため常時表示する（UI-12）
 const site = computed(() => siteEnv())
@@ -53,7 +58,7 @@ async function logout(): Promise<void> {
   try {
     await auth.logout()
   } catch {
-    ui.notify('ログアウトに失敗しましたが、この端末からはサインアウトしました', 'warning')
+    ui.notify('サインアウトに失敗しましたが、この端末からはサインアウトしました', 'warning')
   }
   await router.push({ name: 'login' })
 }
@@ -73,14 +78,16 @@ async function logout(): Promise<void> {
         density="compact"
         nav
       >
-        <v-list-item
-          prepend-icon="mdi-home-outline"
-          title="ホーム"
-          :to="{ name: 'home' }"
-          exact
-          @click="closeOnNarrow"
-        />
-        <v-divider class="my-1" />
+        <template v-if="!me.restricted">
+          <v-list-item
+            prepend-icon="mdi-home-outline"
+            title="ホーム"
+            :to="{ name: 'home' }"
+            exact
+            @click="closeOnNarrow"
+          />
+          <v-divider class="my-1" />
+        </template>
         <v-list-item
           v-for="app in visibleApps"
           :key="app.id"
@@ -97,8 +104,14 @@ async function logout(): Promise<void> {
           nav
         >
           <v-list-item
+            prepend-icon="mdi-account-circle-outline"
+            title="アカウント"
+            :to="{ name: 'account' }"
+            @click="closeOnNarrow"
+          />
+          <v-list-item
             prepend-icon="mdi-logout"
-            title="ログアウト"
+            title="サインアウト"
             @click="logout"
           />
         </v-list>
@@ -145,7 +158,24 @@ async function logout(): Promise<void> {
             />
           </template>
         </v-tooltip>
-        <span class="text-body-2 d-none d-sm-inline">{{ auth.email }}</span>
+        <v-btn
+          data-test="account-link"
+          :to="{ name: 'account' }"
+          variant="text"
+          prepend-icon="mdi-account-circle-outline"
+          class="text-none"
+          aria-label="アカウント"
+        >
+          <span class="d-none d-sm-inline">{{ auth.email }}</span>
+        </v-btn>
+        <v-btn
+          data-test="appbar-signout"
+          icon="mdi-logout"
+          variant="text"
+          title="サインアウト"
+          aria-label="サインアウト"
+          @click="logout"
+        />
       </template>
       <template
         v-if="currentNav.length"

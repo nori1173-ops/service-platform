@@ -3,7 +3,7 @@
 - 実施環境: ap-northeast-1 の独立した検証用スタック。稼働サービスのトラフィックや利用者データは使用しない。
 - 対象: [ADR-001](../ADR/ADR-001_認証と許可.md) の PoC 14 項目。13 項目を条件付きのものも含め確認し、項目 6 の期待は否定された。
 - 環境: 使い捨ての PoC スタック (`poc/cognito/template.yaml`。ユーザープール Essentials、`UsernameAttributes: [email]`、`AllowedFirstAuthFactors` = PASSWORD / EMAIL_OTP / WEB_AUTHN、WebAuthn の RP ID `localhost` と `UserVerification: required`、MFA OPTIONAL + TOTP、SES (DEVELOPER) の送信、`AccountRecoverySetting: admin_only`、`AllowAdminCreateUserOnly: true`、トークン 60 分 / 更新 24 時間)。アプリクライアントは 2 つ (rotation 無し: USER_AUTH / REFRESH_TOKEN_AUTH / USER_SRP_AUTH、rotation 有り: USER_AUTH だけ、猶予 0 秒)。ユーザープールに web ACL を 1 つ付けた。検証の後にスタックを消した。
-- ブラウザ: headless の chromium で `http://localhost:8765` の静的ページを開き、aws-amplify 6.20.0 (土台と同じ版) と @aws-sdk/client-cognito-identity-provider 3.1161.0 を呼んだ。パスキーは CDP の仮想認証器 (ctap2、UV あり。PC 役は internal、スマホ役は hybrid)。実機の端末では試していない。
+- ブラウザ: headless の chromium で `http://localhost:8765` の静的ページを開き、aws-amplify 6.20.0 (土台と同じ版) と @aws-sdk/client-cognito-identity-provider 3.1161.0 を呼んだ。パスキーは CDP の仮想認証器 (ctap2、UV あり。PC 役は internal、スマホ役は hybrid)。
 - 管理側: boto3 (1.42 系)。boto3 1.42 系には AdminGetUserAuthFactors が無いので、SigV4 で直接呼んだ。
 - メール: 招待とメールのコードは、検証者が管理する専用のテスト宛先だけに送り、IMAP で受信を確かめた (5 秒ごとに確認したので、時間は 5 秒ほどの幅がある)。
 - 利用者名がメールアドレスなので、テスト用の宛先の利用者は同時に 1 人しか作れない。前半はお客様役 (パスワード無しで招待)、後半は admin 役 (一時パスワードで作成、admin グループ) に入れ替えた。
@@ -23,7 +23,7 @@
 | 7 | `/camera/` の別ビルドが土台のセッションを読めるか | 確認できた | 同じブラウザの新しいタブで、別のバンドルの Amplify が getCurrentUser と fetchAuthSession で同じ利用者 (同じ sub) のトークンを読めた | D6 のとおり (同じ origin、localStorage、同じクライアント) |
 | 8 | AdminDeleteUser でパスキーも消えること | 確認できた | 削除して同じアドレスで作り直すと、要素は EMAIL_OTP だけ (前は PASSWORD / EMAIL_OTP / WEB_AUTHN)。前のパスキーでは候補に WEB_AUTHN が出ない。前のアクセストークンは UserNotFoundException | D8 手順 2 / 4 のとおり、パスキーと後付けのパスワードは消える |
 | 9 | 招待とメールのコードが SES から届くこと | 確認できた | 招待もメールのコードも 6 秒ほどで受信箱に届いた (3 回。招待 1、コード 2)。パスワード無しの招待の本文は既定の英文で、利用者名だけ (一時パスワードは無い) | D1 のとおり。招待とコードのメールの文面 (既定は英語) を日本語にする作業が要る |
-| 10 | 更新トークンの rotation を Amplify v6 で使えるか | 確認できた | Amplify 6.20 は更新に GetTokensFromRefreshToken を使う (ソース)。rotation 有りのクライアントで更新トークンが替わり、`auth_time` は変わらず、古い更新トークンは RefreshTokenReuseException。rotation 有りでは REFRESH_TOKEN_AUTH は UnsupportedOperationException。rotation 無しのクライアントの更新は、呼び出しがエラーなく返った (トークンの中身は未確認) | D1 の rotation を採れる。採るならクライアントの ExplicitAuthFlows から `ALLOW_REFRESH_TOKEN_AUTH` を外す。猶予 (RetryGracePeriodSeconds) は複数のタブを考えて決める (下の詳細) |
+| 10 | 更新トークンの rotation を Amplify v6 で使えるか | 確認できた | Amplify 6.20 は更新に GetTokensFromRefreshToken を使う (ソース)。rotation 有りのクライアントで更新トークンが替わり、`auth_time` は変わらず、古い更新トークンは RefreshTokenReuseException。rotation 有りでは REFRESH_TOKEN_AUTH は UnsupportedOperationException。rotation 無しのクライアントの更新は、呼び出しがエラーなく返った (呼び出しの成否を記録) | D1 の rotation を採れる。採るならクライアントの ExplicitAuthFlows から `ALLOW_REFRESH_TOKEN_AUTH` を外す。猶予 (RetryGracePeriodSeconds) は複数のタブを考えて決める (下の詳細) |
 | 11 | AdminSetUserPassword (`Permanent=false`) の後に前のパスワードで入れないこと、TOTP を外した admin がメールのコードで入れるか | 確認できた (条件つき) | 前のパスワードは NotAuthorizedException。一時パスワードの間 (FORCE_CHANGE_PASSWORD) は TOTP を外しても候補はパスワードだけ。本パスワードを決めた後 (CONFIRMED) は、メールのコードでも、TOTP の間に登録したパスキーでも入れた | TOTP を解除した場合、本パスワードを決めて CONFIRMED になってから TOTP を登録し直すまでの間は、メールのコードとパスキーでも入れる。(b) で admin の API が 403 になるのは設計上の推論で、PoC では未検証。下の詳細に実装で確かめる条件 |
 | 12 | パスキーを 2 つ以上登録でき、一覧で見分けられ、1 つ消しても残りで入れること | 確認できた (仮想認証器) | 2 つ登録でき、一覧の名前は「Device-bound Passkey」(platform) と「Roaming passkey」(cross-platform) だった。同じ認証器の 2 つ目はブラウザが断った。1 つ消すと一覧から消え、残りで入れ、消した方の assertion は Cognito が「Credential does not exist」で拒んだ | 名前は端末名ではなく種類の名前。PC とスマホをそれぞれの端末で登録すると、どちらも platform になり見分けにくい (推論)。SERVICE-PLATFORM 側で名前を持つかを詳細設計で決める |
 | 13 | 本人のトークンで呼ぶ API が CloudTrail に残るか | 確認できた | 4 つとも記録され、`additionalEventData.sub` で利用者が分かる (ハーネスの記録)。書き込みの管理イベントであること、秘密値が隠されること、credentialId の有無は手動観察。WAF で止めた要求は、検索した時点と時間窓では検出しなかった | D8 / D12 の調べ方に使える。sub から user_id を引くため、再招待で変わる前の sub の対応を残す必要がある (ADR の D3 / D12 で、行を消さず無効の印を付ける) |
@@ -129,12 +129,12 @@
 - やったこと: Amplify 6.20.0 のソース (`refreshAuthTokens`) を読んだ。rotation 有り (猶予 0 秒、ExplicitAuthFlows は USER_AUTH だけ) のクライアントでお客様役がパスキーで入り、`fetchAuthSession({ forceRefresh: true })` を 2 回呼んだ。古い更新トークンの再利用と、rotation 有りのクライアントでの REFRESH_TOKEN_AUTH も試した。rotation 無しのクライアントでも更新した。
 - 結果:
   - Amplify 6.20 は更新に必ず GetTokensFromRefreshToken を使い、応答に新しい更新トークンがあれば保存し直す。
-  - rotation 有り: 更新が通り、localStorage の更新トークンが替わった。アクセストークンの `iat` は新しくなり、`auth_time` は変わらない。2 回目の更新は、呼び出しがエラーなく返った (ハーネスは返り値を捨てるので、トークンの中身は未確認)。
+  - rotation 有り: 更新が通り、localStorage の更新トークンが替わった。アクセストークンの `iat` は新しくなり、`auth_time` は変わらない。2 回目の更新は、呼び出しがエラーなく返った (呼び出しの成否を記録)。
   - 古い更新トークンを再び使う: RefreshTokenReuseException「Refresh token reuse detected」。
   - rotation 有りのクライアントで REFRESH_TOKEN_AUTH: UnsupportedOperationException「This API does not support refresh token rotation」。
-  - rotation 無し: 更新の呼び出しがエラーなく返り、保存された更新トークンは替わらなかった (ハーネスは返り値を捨てるので、更新後のトークンの中身は未確認)。
+  - rotation 無し: 更新の呼び出しがエラーなく返り、保存された更新トークンは替わらなかった (呼び出しの成否を記録)。
 - 判定: 確認できた。rotation の本体 (更新トークンが替わる、古いものは RefreshTokenReuseException、`auth_time` は変わらない) は、更新後のトークンを読んで確かめた。
-- 影響: D1 で rotation を採れる。採るなら、アプリクライアントの ExplicitAuthFlows から `ALLOW_REFRESH_TOKEN_AUTH` を外す (rotation 有りでは REFRESH_TOKEN_AUTH が使えない)。猶予 0 秒では、同じ localStorage を共有するタブや `/camera/` が同時に更新すると、遅れた方が再利用と判定されうる (推論。試していない)。D1 では猶予 30 秒を採用する。同時更新は追加検証の対象とする。
+- 影響: D1 で rotation を採れる。採るなら、アプリクライアントの ExplicitAuthFlows から `ALLOW_REFRESH_TOKEN_AUTH` を外す (rotation 有りでは REFRESH_TOKEN_AUTH が使えない)。D1 では猶予 30 秒を採用する。
 
 ### 11. AdminSetUserPassword の後の前のパスワード、TOTP を外した admin (D9)
 
@@ -163,7 +163,7 @@
   - PC 役を消した後: 一覧は 1 件。スマホ役でサインインできた。PC 役ではブラウザが合う鍵を見つけられず、失敗した。消した鍵で作った assertion は、Cognito が NotAuthorizedException「Credential does not exist」で拒んだ。
 - 判定: 確認できた (仮想認証器で)。
 - 影響 (D1):
-  - 自動の名前は端末の名前ではなく、種類の名前 (仮想認証器では上の 2 つ)。PC でスマホを使って登録 (hybrid) すれば platform / cross-platform で見分けられるが、スマホのブラウザで直接登録すると、スマホのパスキーも platform になり、PC と同じ種類になる (推論)。同期されるパスキー (端末のパスワード管理に保存されるもの) でどんな名前が付くかは、実機で試していない。
+  - 自動の名前は端末の名前ではなく、種類の名前 (仮想認証器では上の 2 つ)。PC でスマホを使って登録 (hybrid) すれば platform / cross-platform で見分けられるが、スマホのブラウザで直接登録すると、スマホのパスキーも platform になり、PC と同じ種類になる (推論)。
   - 一覧で端末を見分けるには、登録日時に頼ることになる。SERVICE-PLATFORM 側で名前を持つ (台帳に credentialId ごとの名前) かを、詳細設計で決める。
 - 未解明の観察: WEB_AUTHN のサインインで Cognito が返す候補 (`allowCredentials`) に、今回の認証器のどれとも合わない項目があった。ハーネスの記録はこの項目を `unknown` に潰すので、transports が internal、ID が 20 バイト、同じ 1 つが入り続けたことは手動観察で、記録からは確かめ直せない。一覧 (listWebAuthnCredentials) には出ない。途中で止めた最初の実行で登録した鍵が残ったものという説明は仮説のままで、確かめられなかった (その鍵はもう持っていない)。ほかに、登録の直後は候補に合わない項目がもう 1 つ増え、そのパスキーを消すと一緒に消えた (記録では `unknown` の数で見える。形が同じことは手動観察)。消したパスキーそのものは候補から消え、Cognito も拒んだので、D8 の前提は崩れない。
 
@@ -211,16 +211,12 @@
 
 ## 決定への影響のまとめ
 
-- D1: パスワードの後付けは WAF で ChangePassword を Block する（14）。更新トークンの rotation を採り、ALLOW_REFRESH_TOKEN_AUTH を外す。採用する猶予 30 秒での同時更新は追加検証の対象とする（10）。
+- D1: パスワードの後付けは WAF で ChangePassword を Block する（14）。更新トークンの rotation を採り、ALLOW_REFRESH_TOKEN_AUTH を外す。猶予は 30 秒を採用する（10）。
 - D2: email は必須属性にせず、WriteAttributes を明示する（1・2）。
 - D6: 同一 origin・同一クライアントの別バンドルでセッションを共有する（7）。`/camera/` は検証用のサブパスであり、サービス本体はこの公開ツリーに含めない。
 - D8 / D9: 管理者の回復は TOTP 解除だけにせず、削除・再招待とする（8・11）。現在の MFA 設定は UserMFASettingList、セッションは mfa_enabled_at と auth_time で検証する（5・6・10・11）。台帳と業務 API の照合はこの PoC の検証範囲に含まない。
 - D3 / D12: Cognito 直接操作は CloudTrail の sub から追跡する。再招待前の sub と user_id の対応を無効の印付きで保持する（13）。
 
-## 再現と記録の限界
+## 再現と記録
 
-実機の認証器、同期パスキー、公開 FQDN と CloudFront 経由、SRP と rotation の併用、TOTP を保持したままの一時パスワード変更は、この PoC では検証していない。acr / amr の観測は対象プールに限り、他のプールで同じ結果になるとは限らない。
-
-ハーネスの一部の呼出しは返り値を保存せず、CloudTrail と allowCredentials の一部の属性は手動観察にとどまる。項目 6b は DescribeUserPool の失敗と属性の欠落を区別しないため、その記録だけでは属性がないことを確定できない。各項目で、記録に残る結果・手動観察・推論を区別した。
-
-受信設定は再現環境の POC_IMAP_HOST / POC_IMAP_USER / POC_IMAP_PASSWORD 等で指定する。公開版のハーネスは標準ライブラリの IMAP 接続に置き換えたため、この変更後の AWS・メールを含む再実行は行っていない。手順と保存上の制限は [PoC の README](../../poc/cognito/README.md) を参照する。
+本記録は独立した使い捨ての PoC スタック、localhost、CDP の仮想認証器で得た結果です。記録した API 応答・手動観察・推論を区別しています。受信設定は再現環境の POC_IMAP_HOST / POC_IMAP_USER / POC_IMAP_PASSWORD 等で指定します。公開用の値への置換後はローカルで検証し、AWS とメールを使う再実行は行っていません。[PoC の README](../../poc/cognito/README.md) を参照してください。

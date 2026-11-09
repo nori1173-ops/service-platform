@@ -1,8 +1,27 @@
 import axios, { type AxiosInstance } from 'axios'
 import { fetchAuthSession } from 'aws-amplify/auth'
-import type { ApiError } from '@/types'
+import { extractApiError } from './apiError'
+
+export { extractApiError }
 
 const REQUEST_TIMEOUT_MS = 30000
+
+/**
+ * 利用者の状態か admin の守りで断られた 403 (計画 2.6 の共通のエラーコード)。
+ * サインアウトはせず、アカウントの画面で理由を見せる。
+ */
+const DENIED_CODES: ReadonlySet<string> = new Set([
+  'USER_SUSPENDED',
+  'USER_NOT_REGISTERED',
+  'ADMIN_NOT_ACTIVE',
+  'ADMIN_SESSION_STALE',
+  'ADMIN_MFA_MISSING',
+])
+
+export interface AppApiOptions {
+  /** 403 の停止・admin の守りでアカウントの画面へ移るか (既定 true)。base は画面が自分で扱う */
+  redirectOnDenied?: boolean
+}
 
 function statusOf(error: unknown): number | undefined {
   if (error && typeof error === 'object' && 'response' in error) {
@@ -43,8 +62,25 @@ async function handleUnauthorized(): Promise<void> {
   await redirectToLoginQuietly()
 }
 
+/** 403 の停止・admin の守りの後始末。理由を控えて状態を読み直し、アカウントの画面へ移る */
+async function handleDenied(code: string): Promise<void> {
+  try {
+    const { useMeStore } = await import('@/stores/me')
+    const me = useMeStore()
+    me.noteDenied(code)
+    await me.load()
+    const { default: router } = await import('@/router')
+    if (router.currentRoute.value.name !== 'account') {
+      await router.push({ name: 'account' })
+    }
+  } catch {
+    return
+  }
+}
+
 /** アプリ専用の axios インスタンスを作る（`/api/{appId}`） */
-export function createAppApi(appId: string): AxiosInstance {
+export function createAppApi(appId: string, options: AppApiOptions = {}): AxiosInstance {
+  const redirectOnDenied = options.redirectOnDenied ?? true
   const instance = axios.create({
     baseURL: `/api/${appId}`,
     timeout: REQUEST_TIMEOUT_MS,
@@ -63,33 +99,18 @@ export function createAppApi(appId: string): AxiosInstance {
   instance.interceptors.response.use(
     (response) => response,
     async (error: unknown) => {
-      if (statusOf(error) === 401) {
+      const status = statusOf(error)
+      if (status === 401) {
         await handleUnauthorized()
+      } else if (status === 403 && redirectOnDenied) {
+        const code = extractApiError(error)?.code
+        if (code && DENIED_CODES.has(code)) {
+          await handleDenied(code)
+        }
       }
       return Promise.reject(error)
     },
   )
 
   return instance
-}
-
-/** axios エラーから API エンベロープの `error` を取り出す。無ければ null。 */
-export function extractApiError(error: unknown): ApiError | null {
-  if (!error || typeof error !== 'object' || !('response' in error)) {
-    return null
-  }
-  const data = (error as { response?: { data?: unknown } }).response?.data
-  if (!data || typeof data !== 'object') {
-    return null
-  }
-  const envelopeError = (data as { error?: unknown }).error
-  if (
-    envelopeError &&
-    typeof envelopeError === 'object' &&
-    typeof (envelopeError as ApiError).code === 'string' &&
-    typeof (envelopeError as ApiError).message === 'string'
-  ) {
-    return envelopeError as ApiError
-  }
-  return null
 }

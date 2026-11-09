@@ -1,100 +1,24 @@
 #!/usr/bin/env bash
-# Cognito ユーザーを admin グループに追加する。
+# 最初の admin を作る（ADR-001 D9、設計 13.4 の手順 11）。中身は scripts/admin_ops.py create-admin。
 #
 # 使い方:
-#   scripts/add-admin.sh dev devA@example.co.jp
-#   scripts/add-admin.sh prod devA@example.co.jp
+#   scripts/add-admin.sh dev someone@example.co.jp [--output-dir DIR]
+#   scripts/add-admin.sh prod someone@example.co.jp
 #
-# admin が 1 人も居ないとユーザー管理画面（/admin-users。利用者の一覧・admin の付与/解除など）を
-# 開ける人がおらず、利用者の管理ができない。初期設定用の参考ツール。
+# Cognito に招待メールを送らずに作り (一時パスワード)、台帳の行・admin グループ (準備中)・監査を書く。
+# 一時パスワードは標準出力に出さず、リポジトリの外の権限 600 のファイルに書いてパスだけを示す。
+# 本人の TOTP の登録と別経路の確認の後に scripts/admin_ops.py activate-admin で有効にする。
 set -euo pipefail
 
-PROJECT="service-platform"
-REGION="${AWS_REGION:-ap-northeast-1}"
-GROUP="admin"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export AWS_PAGER=""
-
-usage() {
-  cat >&2 <<'USAGE'
-usage: scripts/add-admin.sh {dev|prod} {email}
-
-前提:
-  対象ユーザーが自分でサインアップ済みであること（セルフサインアップのみ）。
-
-環境変数:
-  AWS_PROFILE / AWS_REGION  AWS CLI の接続先
-USAGE
-}
-
-if [ "$#" -ne 2 ]; then
-  usage
+if [ "$#" -lt 2 ]; then
+  echo "usage: scripts/add-admin.sh {dev|prod} {email} [--output-dir DIR]" >&2
   exit 1
 fi
 
-ENV_NAME="$1"
-EMAIL="$2"
-case "${ENV_NAME}" in
-  dev | prod) ;;
-  *)
-    usage
-    exit 1
-    ;;
-esac
-
-case "${EMAIL}" in
-  *@example.co.jp) ;;
-  *)
-    echo "サインアップは @example.co.jp のみ許可されています: ${EMAIL}" >&2
-    exit 1
-    ;;
-esac
-
-confirm() {
-  local answer=""
-  read -r -p "$1 [y/N]: " answer || true
-  case "${answer}" in
-    y | Y | yes | YES) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-USER_POOL_PARAM="/${PROJECT}/${ENV_NAME}/cognito/user-pool-id"
-if ! USER_POOL_ID="$(aws ssm get-parameter --name "${USER_POOL_PARAM}" --region "${REGION}" --query 'Parameter.Value' --output text 2>/dev/null)" \
-  || [ -z "${USER_POOL_ID}" ] || [ "${USER_POOL_ID}" = "None" ]; then
-  echo "SSM パラメータ ${USER_POOL_PARAM} を取得できませんでした。core スタックのデプロイを確認してください。" >&2
-  exit 1
+cd "${ROOT}"
+if command -v uv >/dev/null 2>&1; then
+  exec uv run python scripts/admin_ops.py create-admin "$@"
 fi
-
-echo "=== admin グループへの追加 ==="
-echo "  Env       : ${ENV_NAME}"
-echo "  UserPool  : ${USER_POOL_ID}"
-echo "  User      : ${EMAIL}"
-echo "  Region    : ${REGION}"
-
-if ! STATUS="$(aws cognito-idp admin-get-user --user-pool-id "${USER_POOL_ID}" --username "${EMAIL}" --region "${REGION}" --query 'UserStatus' --output text 2>/dev/null)"; then
-  echo "ユーザー ${EMAIL} が見つかりません。先に本人にサインアップしてもらってください。" >&2
-  exit 1
-fi
-echo "  Status    : ${STATUS}"
-
-if [ "${ENV_NAME}" = "prod" ]; then
-  if ! confirm "prod の ${EMAIL} に admin を付与します。続行しますか?"; then
-    echo "中止しました。"
-    exit 1
-  fi
-fi
-
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id "${USER_POOL_ID}" \
-  --username "${EMAIL}" \
-  --group-name "${GROUP}" \
-  --region "${REGION}"
-
-echo ""
-echo "現在のグループ:"
-aws cognito-idp admin-list-groups-for-user --user-pool-id "${USER_POOL_ID}" --username "${EMAIL}" --region "${REGION}" \
-  --query 'Groups[].GroupName' --output text
-
-echo ""
-echo "反映は次回サインイン（ID トークン再取得）から。管理操作の有効化は ADR D9 の条件も確認してください。"
+exec python3 scripts/admin_ops.py create-admin "$@"

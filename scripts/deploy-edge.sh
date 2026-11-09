@@ -28,6 +28,7 @@ usage: scripts/deploy-edge.sh {dev|prod}
 
 環境変数:
   AWS_PROFILE / AWS_REGION  AWS CLI の接続先
+  ALLOW_NO_WAF=1            prod で web ACL が未登録でも配備する
 USAGE
 }
 
@@ -52,6 +53,8 @@ esac
 
 SECRET_PARAM="/${PROJECT}/${ENV_NAME}/edge/origin-verify-secret"
 ADMIN_USERS_API_DOMAIN_PARAM="/${PROJECT}/${ENV_NAME}/apps/admin-users/api-domain"
+BASE_API_DOMAIN_PARAM="/${PROJECT}/${ENV_NAME}/apps/base/api-domain"
+WEB_ACL_ARN_PARAM="/${PROJECT}/${ENV_NAME}/waf/cloudfront-web-acl-arn"
 
 echo "=== edge デプロイ ==="
 echo "  Env       : ${ENV_NAME} (--config-env ${CFG_ENV})"
@@ -80,6 +83,44 @@ else
   echo "  AdminUsersApiDomain : 未登録（${ADMIN_USERS_API_DOMAIN_PARAM}）。API 経路なしでデプロイします"
 fi
 
+BASE_API_DOMAIN="$(aws ssm get-parameter --name "${BASE_API_DOMAIN_PARAM}" --region "${REGION}" --query 'Parameter.Value' --output text 2>/dev/null || true)"
+if [ "${BASE_API_DOMAIN}" = "None" ]; then
+  BASE_API_DOMAIN=""
+fi
+if [ -n "${BASE_API_DOMAIN}" ]; then
+  echo "  BaseApiDomain : ${BASE_API_DOMAIN}"
+else
+  echo "  BaseApiDomain : 未登録（${BASE_API_DOMAIN_PARAM}）。API 経路なしでデプロイします"
+fi
+
+# WAF とその SSM は us-east-1。標準エラーを値と分け、未登録と取得の障害を区別する。
+umask 077
+WAF_ERROR="$(mktemp -t service-platform-edge-waf.XXXXXXXX)"
+TMP_CONFIG=""
+trap 'rm -f "${WAF_ERROR}" "${TMP_CONFIG}"' EXIT
+
+if WEB_ACL_ARN="$(aws ssm get-parameter --name "${WEB_ACL_ARN_PARAM}" --region us-east-1 --query 'Parameter.Value' --output text 2>"${WAF_ERROR}")"; then
+  cat "${WAF_ERROR}" >&2
+  if [ "${WEB_ACL_ARN}" = "None" ]; then
+    WEB_ACL_ARN=""
+  fi
+elif grep -Fq '(ParameterNotFound)' "${WAF_ERROR}"; then
+  WEB_ACL_ARN=""
+else
+  cat "${WAF_ERROR}" >&2
+  echo "WAF の SSM パラメータを取得できませんでした（us-east-1）。権限と接続を確認してください。" >&2
+  exit 1
+fi
+if [ -n "${WEB_ACL_ARN}" ]; then
+  echo "  WAF WebAclArn : us-east-1 の SSM から取得しました"
+else
+  if [ "${ENV_NAME}" = "prod" ] && [ "${ALLOW_NO_WAF:-}" != "1" ]; then
+    echo "WAF の ARN が未登録です（${WEB_ACL_ARN_PARAM}、us-east-1）。先に scripts/deploy-waf.sh prod を実行してください。ACL なしで配備する場合だけ ALLOW_NO_WAF=1 を指定してください。" >&2
+    exit 1
+  fi
+  echo "  WAF WebAclArn : 未登録（${WEB_ACL_ARN_PARAM}、us-east-1）。ACL なしでデプロイします"
+fi
+
 # sam deploy --parameter-overrides はコマンドラインの指定が samconfig の同名キーを
 # 丸ごと置き換える（追記ではない）。samconfig 側の値を読み出して前置する。
 BASE_OVERRIDES="$(python3 -c '
@@ -96,17 +137,18 @@ if [ -z "${BASE_OVERRIDES}" ]; then
   exit 1
 fi
 
-OVERRIDES="${BASE_OVERRIDES} OriginVerifySecret=${SECRET}"
+# SAM CLI が空値を省略しないよう引用符を含めて渡し、前回の関連付けを CloudFormation の以前の値から引き継がない。
+OVERRIDES="${BASE_OVERRIDES} OriginVerifySecret=${SECRET} WebAclArn=\"${WEB_ACL_ARN}\""
 if [ -n "${ADMIN_USERS_API_DOMAIN}" ]; then
   OVERRIDES="${OVERRIDES} AdminUsersApiDomain=${ADMIN_USERS_API_DOMAIN}"
 fi
-
+if [ -n "${BASE_API_DOMAIN}" ]; then
+  OVERRIDES="${OVERRIDES} BaseApiDomain=${BASE_API_DOMAIN}"
+fi
 # --parameter-overrides で渡すと秘密が sam プロセスのコマンドライン（/proc/*/cmdline は
 # 同一ホストの他ユーザーからも読める）に載る。パーミッション 600 の一時 samconfig に
 # 書いて --config-file で渡し、終了時に必ず消す。
-umask 077
 TMP_CONFIG="$(mktemp -t service-platform-edge-samconfig.XXXXXXXX.toml)"
-trap 'rm -f "${TMP_CONFIG}"' EXIT
 
 OVERRIDES="${OVERRIDES}" python3 -c '
 import os

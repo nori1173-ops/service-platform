@@ -70,6 +70,10 @@ describe('アプリレジストリ', () => {
 
   it('id が予約パスと衝突しない', () => {
     expect(reservedIds(registered)).toEqual([])
+    // 土台の画面 (ADR D5) とカメラ判定 SPA の /camera/ (ADR D6) の分を空けておく
+    for (const path of ['account', 'devices', 'camera']) {
+      expect(RESERVED_PATHS).toContain(path)
+    }
     expect(reservedIds(RESERVED_PATHS.map((path) => sampleApp(path)))).toEqual([...RESERVED_PATHS])
   })
 

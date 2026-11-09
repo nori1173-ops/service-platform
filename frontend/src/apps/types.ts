@@ -7,6 +7,9 @@ export const RESERVED_PATHS: readonly string[] = [
   'forbidden',
   'api',
   'assets',
+  'account',
+  'devices',
+  'camera',
 ]
 
 export interface AppNavItem {

@@ -1,0 +1,19 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "service-platform-waf-dev"
+region = "us-east-1"
+s3_prefix = "service-platform-waf-dev"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+tags = "Project=service-platform App=waf Env=dev"
+parameter_overrides = "ProjectName=service-platform Env=dev"
+
+[production.deploy.parameters]
+stack_name = "service-platform-waf-prod"
+region = "us-east-1"
+s3_prefix = "service-platform-waf-prod"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+tags = "Project=service-platform App=waf Env=prod"
+parameter_overrides = "ProjectName=service-platform Env=prod"

@@ -1,21 +1,13 @@
-"""Cognito PreSignUp トリガー。
+"""Cognito PreSignUp トリガー（ADR-001 D2）。
 
-`@example.co.jp` 以外のメールアドレスによるセルフサインアップを拒否する。
-Cognito は例外が投げられた場合に登録を失敗させる。
+招待 (AdminCreateUser) から呼ばれたときだけ通し、自己登録 (SignUp) と外部の IdP からの作成を拒む。
+プールの `AllowAdminCreateUserOnly` と重ねた多重の守り。Cognito は例外が投げられると作成を失敗させる。
 """
 
-ALLOWED_DOMAIN = "example.co.jp"
+ADMIN_CREATE_USER = "PreSignUp_AdminCreateUser"
 
 
 def handler(event: dict, context) -> dict:
-    email = event.get("request", {}).get("userAttributes", {}).get("email", "")
-    if not email:
-        raise Exception("email attribute is required")
-
-    address = str(email).strip().lower()
-    if address.count("@") != 1:
-        raise Exception("email format is invalid")
-    if address.split("@")[1] != ALLOWED_DOMAIN:
-        raise Exception(f"Signup is restricted to @{ALLOWED_DOMAIN} domain only")
-
+    if event.get("triggerSource") != ADMIN_CREATE_USER:
+        raise Exception("Self sign-up is not allowed")
     return event

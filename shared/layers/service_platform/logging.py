@@ -55,10 +55,14 @@ _logger: LambdaLogger | None = None
 
 
 def _quiet_noisy_loggers() -> None:
-    """秘密を DEBUG で吐く AWS SDK 系ロガーを INFO 以上に引き上げる。"""
+    """秘密を DEBUG で吐く AWS SDK 系ロガーを INFO 以上に引き上げる。
+
+    root の水準に任せる (NOTSET) と、後から root が DEBUG になったときに要求の本文 (一時パスワードなど) が
+    出るので、水準を明示する。
+    """
     for name in NOISY_LOGGERS:
         noisy = std_logging.getLogger(name)
-        if noisy.getEffectiveLevel() < std_logging.INFO:
+        if noisy.level < std_logging.INFO:
             noisy.setLevel(std_logging.INFO)
 
 

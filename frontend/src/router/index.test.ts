@@ -25,17 +25,55 @@ describe('router', () => {
     expect(router.resolve('/apps/demo-app/items').name).toBe('not-found')
   })
 
-  it('/login と /signup は requiresAuth: false', () => {
-    expect(router.resolve('/login').meta.requiresAuth).toBe(false)
-    expect(router.resolve('/signup').meta.requiresAuth).toBe(false)
+  it.each([
+    ['/login', 'login'],
+    ['/login/admin', 'login-admin'],
+  ])('%s は未認証で開ける auth レイアウトのルート', (path, name) => {
+    const resolved = router.resolve(path)
+
+    expect(resolved.name).toBe(name)
+    expect(resolved.meta.requiresAuth).toBe(false)
+    expect(resolved.meta.layout).toBe('auth')
+  })
+
+  it('/account はサインインの要るシェルの中のルート', () => {
+    const resolved = router.resolve('/account')
+
+    expect(resolved.name).toBe('account')
+    expect(resolved.matched.every((record) => record.meta.requiresAuth !== false)).toBe(true)
+    expect(resolved.matched[0].meta.layout).toBe('shell')
     expect(router.resolve('/').meta.requiresAuth).toBeUndefined()
   })
 
-  it('/forgot-password は未認証で開ける auth レイアウトのルート', () => {
-    const resolved = router.resolve('/forgot-password')
+  // ADR D5: 入り方の選択 → 通信機ログイン → サービスの一覧
+  it.each([
+    ['/', 'home'],
+    ['/devices', 'devices'],
+    ['/devices/12345678', 'device-services'],
+  ])('%s はサインインの要るシェルの中のルート (%s)', (path, name) => {
+    const resolved = router.resolve(path)
 
-    expect(resolved.name).toBe('forgot-password')
-    expect(resolved.meta.requiresAuth).toBe(false)
-    expect(resolved.meta.layout).toBe('auth')
+    expect(resolved.name).toBe(name)
+    expect(resolved.matched.every((record) => record.meta.requiresAuth !== false)).toBe(true)
+    expect(resolved.matched[0].meta.layout).toBe('shell')
+  })
+
+  it('サービスの一覧は通信機アカウントを props で受ける', () => {
+    const resolved = router.resolve('/devices/12345678')
+
+    expect(resolved.params.account).toBe('12345678')
+    expect(resolved.matched.at(-1)?.props.default).toBe(true)
+  })
+
+  it('入り方の選択の画面を / に置く (HomeView を置き換えた)', async () => {
+    const record = router.resolve('/').matched.at(-1)
+    const component = record?.components?.default as () => Promise<{ default: { __name?: string } }>
+
+    expect((await component()).default.__name).toBe('StartView')
+  })
+
+  // 招待制なのでサインアップとパスワードの再設定の画面は持たない (ADR D2 / D1)
+  it.each(['/signup', '/forgot-password'])('%s は無い', (path) => {
+    expect(router.resolve(path).name).toBe('not-found')
   })
 })

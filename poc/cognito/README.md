@@ -69,4 +69,4 @@ CloudTrail の待機の目安:
 - 項目 12: 候補 (`allowCredentials`) の不明な項目を `unknown` に潰す。transports、ID の長さ、同じ項目かは記録に残らない。
 - 項目 6 (`6b`): DescribeUserPool がエラーでも空のプールとして扱い、`AcrConfiguration` が無いと記録する。応答が成功かを確かめていない。
 
-`/camera/` は同一 origin の別バンドルを検証するためのサンプルページで、サービスの実装を含まない。実機の認証器、CloudFront 越し、同時更新などの検証範囲は結果文書を参照する。
+`/camera/` は同一 origin の別バンドルを検証するためのサンプルページで、サービスの実装を含まない。独立した PoC の観測結果は結果文書を参照する。

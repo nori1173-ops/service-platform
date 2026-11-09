@@ -28,7 +28,7 @@ def lambda_environment(monkeypatch):
     monkeypatch.setenv("ORIGIN_VERIFY_SKIP", "1")
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     monkeypatch.setenv("TABLE_NAME", TABLE_NAME)
-    monkeypatch.setenv("NOTIFY_QUEUE_URL", "https://sqs.ap-northeast-1.amazonaws.com/000000000000/notify-test")
+    monkeypatch.setenv("NOTIFY_QUEUE_URL", "https://sqs.ap-northeast-1.amazonaws.com/210000000001/notify-test")
     monkeypatch.setenv("ATTACHMENTS_BUCKET", "service-platform-attachments-test")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
@@ -55,7 +55,7 @@ def http_event():
             "rawQueryString": "",
             "headers": {"content-type": "application/json", "x-origin-verify": "test-secret"},
             "requestContext": {
-                "accountId": "000000000000",
+                "accountId": "210000000001",
                 "apiId": "testapi",
                 "domainName": "testapi.execute-api.ap-northeast-1.amazonaws.com",
                 "http": {"method": method, "path": full_path, "protocol": "HTTP/1.1", "sourceIp": "203.0.113.1"},
@@ -64,7 +64,7 @@ def http_event():
                 "authorizer": {
                     "jwt": {
                         "claims": {
-                            "sub": "00000000-0000-0000-0000-000000000000",
+                            "sub": "00000000-0000-0000-0000-210000000001",
                             "email": email,
                             "cognito:groups": f"[{' '.join(groups or [])}]",
                         }

@@ -50,3 +50,40 @@ def valid_message() -> dict:
         },
         "meta": {"run_id": "RUN#production/2026-10", "target_month": "2026-10"},
     }
+
+
+@pytest.fixture
+def ledger_table(monkeypatch):
+    """moto の台帳テーブル（計画 2.1 のキーと GSI1）を作り、環境変数 `LEDGER_TABLE` を差し替える。"""
+    import boto3
+    from moto import mock_aws
+
+    from service_platform import ledger
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-1")
+    with mock_aws():
+        table = boto3.resource("dynamodb", region_name="ap-northeast-1").create_table(
+            TableName="service-platform-core-ledger-test",
+            BillingMode="PAY_PER_REQUEST",
+            AttributeDefinitions=[
+                {"AttributeName": name, "AttributeType": "S"} for name in ("PK", "SK", "GSI1PK", "GSI1SK")
+            ],
+            KeySchema=[{"AttributeName": "PK", "KeyType": "HASH"}, {"AttributeName": "SK", "KeyType": "RANGE"}],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "GSI1",
+                    "KeySchema": [
+                        {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+        )
+        monkeypatch.setenv("LEDGER_TABLE", "service-platform-core-ledger-test")
+        ledger.reset_clients()
+        yield table
+    ledger.reset_clients()

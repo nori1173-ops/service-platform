@@ -6,27 +6,30 @@ sequenceDiagram
     participant API as HTTP API (JWT authorizer)
     participant L as Lambda (shared レイヤ)
     participant T as 台帳
+    participant C as Cognito
     participant A as 監査テーブル
     B->>CF: 要求 (ID トークン)
     Note over CF: WAF のレート制限
     CF->>API: 転送 (x-origin-verify)
-    Note over API: 署名・期限・iss・aud<br>無効なら 401
+    Note over API: 署名・期限・iss・aud<br>無効なら 401。rate 20 / burst 40
     API->>L: クレーム
     Note over L: x-origin-verify<br>と token_use
-    L->>T: sub → user_id
-    T-->>L: 利用者の状態 (停止なら 403)
+    L->>T: sub → user_id (強い整合)
+    T-->>L: 利用者の状態 (停止・未有効の admin は 403)
+    Note over L,T: 例外は base の GET /me と<br>POST /me/totp-registered だけ
     opt 通信機を伴う API
-        L->>T: 稼働中の通信機の利用期間 P<br>と P での自分の割り当て (期間内)
-        L->>T: ログイン記録 (同じ割り当て<br>valid_from 以後、12 時間)
+        L->>T: (1) 稼働中の通信機の利用期間 P<br>(2) P を扱う根拠 (本人宛・グループ宛の<br>割り当てが期間内か、access が everyone)
+        L->>T: (3) ログイン記録 (P、12 時間、<br>根拠の ID と世代が今の根拠に含まれる)
     end
     opt サービスの API
-        L->>T: サービスの許可 (P、期間内)
+        L->>T: (4) サービスの許可 (P、期間内)
     end
-    opt admin の API
-        L->>T: admin の状態が「有効」か
-        Note over L: TOTP の設定と<br>TOTP を通ったセッションか<br>(ADR D9)
+    opt admin の API (ADR D9)
+        L->>T: admin_state=active と mfa_enabled_at
+        Note over L: auth_time > mfa_enabled_at
+        L->>C: AdminGetUser・グループ<br>(有効・TOTP・admin)
     end
-    Note over L,T: どれか欠ければ 403
+    Note over L,C: どれか欠ければ 403
     L->>L: 処理
-    L->>A: 追記 (user_id)
+    L->>A: 追記 (user_id。上書き不可)
     L-->>B: 応答

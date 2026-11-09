@@ -6,6 +6,7 @@
 """
 
 import pathlib
+import shlex
 import tomllib
 
 import pytest
@@ -17,14 +18,18 @@ CONFIG_ENV_BY_ENV = {"dev": "default", "prod": PROD_CONFIG_ENV}
 
 SAMCONFIGS = {
     "admin-users": "apps/admin-users/samconfig.toml",
+    "base": "apps/base/samconfig.toml",
     "shared": "shared/samconfig.toml",
     "core": "infra/core/samconfig.toml",
+    "waf": "infra/waf/samconfig.toml",
     "edge": "infra/edge/samconfig.toml",
 }
 STACK_NAMES = {
     "admin-users": "service-platform-app-admin-users",
+    "base": "service-platform-app-base",
     "shared": "service-platform-shared",
     "core": "service-platform-core",
+    "waf": "service-platform-waf",
     "edge": "service-platform-edge",
 }
 
@@ -33,16 +38,37 @@ REGION = "ap-northeast-1"
 
 # 環境ごとに値が変わるパラメータ
 EXPECTED_OVERRIDES = {
+    "waf": {"dev": {"Env": "dev"}, "prod": {"Env": "prod"}},
     "admin-users": {
         "dev": {
             "Env": "dev",
             "LogLevel": "DEBUG",
             "UserPoolId": "/service-platform/dev/cognito/user-pool-id",
+            "LedgerTableName": "/service-platform/dev/ledger/table-name",
+            "AuditTableName": "/service-platform/dev/audit/table-name",
         },
         "prod": {
             "Env": "prod",
             "LogLevel": "INFO",
             "UserPoolId": "/service-platform/prod/cognito/user-pool-id",
+            "LedgerTableName": "/service-platform/prod/ledger/table-name",
+            "AuditTableName": "/service-platform/prod/audit/table-name",
+        },
+    },
+    "base": {
+        "dev": {
+            "Env": "dev",
+            "LogLevel": "DEBUG",
+            "UserPoolId": "/service-platform/dev/cognito/user-pool-id",
+            "LedgerTableName": "/service-platform/dev/ledger/table-name",
+            "AuditTableName": "/service-platform/dev/audit/table-name",
+        },
+        "prod": {
+            "Env": "prod",
+            "LogLevel": "INFO",
+            "UserPoolId": "/service-platform/prod/cognito/user-pool-id",
+            "LedgerTableName": "/service-platform/prod/ledger/table-name",
+            "AuditTableName": "/service-platform/prod/audit/table-name",
         },
     },
     "shared": {
@@ -55,6 +81,7 @@ EXPECTED_OVERRIDES = {
             "LogLevel": "DEBUG",
             "SharedLayerArn": "/service-platform/dev/shared/layer-arn",
             "MailDomain": SITE_DOMAIN["dev"],
+            "SiteDomain": SITE_DOMAIN["dev"],
             "CognitoEmailSendingAccount": "DEVELOPER",
         },
         "prod": {
@@ -62,6 +89,7 @@ EXPECTED_OVERRIDES = {
             "LogLevel": "INFO",
             "SharedLayerArn": "/service-platform/prod/shared/layer-arn",
             "MailDomain": SITE_DOMAIN["prod"],
+            "SiteDomain": SITE_DOMAIN["prod"],
             # 初回だけ SES Identity が未検証なので --parameter-overrides で
             # COGNITO_DEFAULT に上書きして立てる
             "CognitoEmailSendingAccount": "DEVELOPER",
@@ -87,7 +115,9 @@ def _deploy_parameters(stack: str, env: str) -> dict:
 
 def _overrides(stack: str, env: str) -> dict[str, str]:
     raw = _deploy_parameters(stack, env).get("parameter_overrides", "")
-    return dict(pair.split("=", 1) for pair in raw.split() if "=" in pair)
+    if isinstance(raw, list):
+        raw = " ".join(raw)
+    return dict(pair.split("=", 1) for pair in shlex.split(raw) if "=" in pair)
 
 
 STACKS = sorted(SAMCONFIGS)
@@ -106,9 +136,11 @@ def test_stack_name_region_and_tags(stack, env):
     parameters = _deploy_parameters(stack, env)
     assert parameters["stack_name"] == f"{STACK_NAMES[stack]}-{env}"
     assert parameters["s3_prefix"] == f"{STACK_NAMES[stack]}-{env}"
-    assert parameters["region"] == REGION
+    assert parameters["region"] == ("us-east-1" if stack == "waf" else REGION)
     assert parameters["tags"].endswith(f"Env={env}"), parameters["tags"]
     assert "Project=service-platform" in parameters["tags"]
+    if SAMCONFIGS[stack].startswith("apps/"):
+        assert f"App={stack}" in parameters["tags"]
 
 
 @pytest.mark.parametrize("stack,env", CASES)

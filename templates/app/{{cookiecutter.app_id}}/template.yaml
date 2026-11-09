@@ -81,6 +81,9 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
       Auth:
         Authorizers:
           CognitoJwtAuthorizer:
@@ -222,7 +225,7 @@ Resources:
       Description: HTTP API のドメイン。edge が origin の DomainName として読む
 
   # ---------------------------------------------------------------------------
-  # バッチ（必要になったら次のブロックのコメントを外す）
+  # バッチ（必要になったら次のブロックのコメントを外す。ADD-APP-GUIDE「6. バッチ・長い処理・アラーム」）
   #
   # BatchFunction:
   #   Type: AWS::Serverless::Function
@@ -292,8 +295,8 @@ Resources:
   #         Value: Queue
   #
   # ---------------------------------------------------------------------------
-  # 15 分を超える処理・分割並列が要る場合のステートマシン
-  # 有効化したら ExecutionsFailed / ExecutionsTimedOut のアラームも足す。
+  # 15 分を超える処理・分割並列が要る場合のステートマシン（設計 10.3 / ADD-APP-GUIDE「6. バッチ・長い処理・アラーム」）
+  # 有効化したら ExecutionsFailed / ExecutionsTimedOut のアラームも足す（ADD-APP-GUIDE「6. バッチ・長い処理・アラーム」）。
   #
   # StateMachine:
   #   Type: AWS::Serverless::StateMachine

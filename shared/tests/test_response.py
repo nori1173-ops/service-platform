@@ -5,7 +5,7 @@ import json
 import pytest
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver
 
-from service_platform.auth import ForbiddenError, UnauthorizedError
+from service_platform.auth import ForbiddenError, TooManyRequestsError, UnauthorizedError
 from service_platform.response import error, error_body, install_error_handlers, json_response, ok
 
 
@@ -128,3 +128,58 @@ def test_unexpected_exception_is_not_swallowed(resolver):
     """想定外の例外は握り潰さず、Lambda のエラーとして上げる（DLQ・アラームに載せる）。"""
     with pytest.raises(RuntimeError):
         resolver.resolve(_http_event("/boom"), None)
+
+
+class CodedForbidden(ForbiddenError):
+    code = "ADMIN_NOT_ACTIVE"
+
+
+class CodedTooMany(TooManyRequestsError):
+    code = "PIN_LOCKED"
+
+
+@pytest.fixture
+def coded_resolver() -> APIGatewayHttpResolver:
+    app = APIGatewayHttpResolver()
+
+    @app.get("/coded")
+    def _coded() -> dict:
+        raise CodedForbidden("管理者として有効ではありません")
+
+    @app.get("/too-many")
+    def _too_many() -> dict:
+        raise CodedTooMany("しばらく待ってください")
+
+    @app.get("/too-many-plain")
+    def _too_many_plain() -> dict:
+        raise TooManyRequestsError()
+
+    install_error_handlers(app)
+    return app
+
+
+def test_forbidden_error_with_a_code_keeps_the_code(coded_resolver):
+    """shared の identity / admin_guard の 403 は、例外の `code` をそのまま返す（計画 2.6）。"""
+    result = coded_resolver.resolve(_http_event("/coded"), None)
+
+    assert result["statusCode"] == 403
+    assert json.loads(result["body"])["error"] == {
+        "code": "ADMIN_NOT_ACTIVE",
+        "message": "管理者として有効ではありません",
+    }
+
+
+def test_too_many_requests_becomes_429_with_the_code(coded_resolver):
+    result = coded_resolver.resolve(_http_event("/too-many"), None)
+
+    assert result["statusCode"] == 429
+    assert json.loads(result["body"])["error"] == {"code": "PIN_LOCKED", "message": "しばらく待ってください"}
+
+
+def test_too_many_requests_has_a_default_code_and_message(coded_resolver):
+    result = coded_resolver.resolve(_http_event("/too-many-plain"), None)
+
+    assert result["statusCode"] == 429
+    error = json.loads(result["body"])["error"]
+    assert error["code"] == "TOO_MANY_REQUESTS"
+    assert error["message"]

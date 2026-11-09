@@ -1,271 +1,229 @@
-"""ユーザー管理の HTTP API ハンドラ。
+"""利用者の管理の HTTP API ハンドラ（計画 2.6 / 4.2、ADR-001 D3 / D8 / D9 / D12）。
 
-ルートは `/api/admin-users` を剥がした形で書く。全ルートが `admin` 専用で、
-`auth.require_group` が唯一の実体である（画面のメニュー非表示とボタンの disabled は
-UX であって権限ではない）。
+ルートは `/api/admin-users` を剥がした形で書く。全ルートが admin 専用で、毎回 shared の
+`identity.require_user` (台帳の利用者と状態) と `admin_guard.require_admin` (クレーム、台帳の admin の状態、
+TOTP を通ったセッション、Cognito の現在状態) を通してから処理する。画面のメニューの非表示とボタンの
+disabled は使い勝手であって権限ではない。
 
-ID トークンは最大 60 分有効なので、`cognito:groups` クレームは admin を外された後・
-無効化された後もしばらく admin のまま残る。この API はユーザーを作り替えられるため、
-**毎リクエストで Cognito の現在状態**（有効であること・`admin` グループに居ること）を
-確認してから処理する（`_admin_claims`）。
-
-自分自身への admin 付与・解除・無効化・削除は 403 で断る。解除・無効化・削除は管理者が
-自分を締め出すと `scripts/add-admin.sh` まで戻らないと復旧できないため、付与は外された本人が
-（クレームが残っている間に）自分へ戻せてしまうため。最後の admin から admin を外す操作も
-409 で断る。いずれの判定もクレームではなく Cognito の実体で行う。
-
-操作の証跡は CloudWatch Logs だけである（テーブルを持たない）。誰が誰に何をして
-どうなったかを `logger.info` に残す。トークン・秘密は載せない。
+利用者の識別子は台帳の user_id。操作の記録は監査テーブル (ADR D12) と CloudWatch Logs の構造化ログに残す。
 """
 
-import json
-from typing import NoReturn
+from urllib.parse import parse_qs
 
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, Response
-from botocore.exceptions import ClientError
 
-from admin_users import cognito
-from service_platform import auth, origin_verify, response
+from admin_users import (
+    assignments,
+    cognito,
+    device_periods,
+    email_change,
+    errors,
+    grants,
+    group_members,
+    groups,
+    users,
+    validation,
+    views,
+)
+from service_platform import admin_guard, identity, origin_verify, response
+from service_platform.auth import ForbiddenError
+from service_platform.ledger import UserContext
 from service_platform.logging import LambdaLogger, get_logger
 
 API_PREFIX = "/api/admin-users"
-
-VALIDATION_ERROR = "VALIDATION_ERROR"
-USER_NOT_FOUND = "USER_NOT_FOUND"
-SELF_OPERATION_FORBIDDEN = "SELF_OPERATION_FORBIDDEN"
-LAST_ADMIN = "LAST_ADMIN"
-PASSWORD_RESET_NOT_ALLOWED = "PASSWORD_RESET_NOT_ALLOWED"  # noqa: S105 — エラーコード名であって秘密ではない
-
-NOT_ADMIN_MESSAGE = "管理者権限がありません"
-USER_NOT_FOUND_MESSAGE = "ユーザーが見つかりません。一覧を更新してください。"
-SELF_OPERATION_MESSAGE = "自分自身には操作できません。"
-LAST_ADMIN_MESSAGE = "最後の管理者から admin を外すことはできません。先に別の管理者を追加してください。"
-PASSWORD_RESET_MESSAGE = "このユーザーはパスワードをリセットできない状態です（未確認・初期パスワード・無効化など）。"  # noqa: S105
-
-# Cognito がリセットを断る状態。ユーザーの状態の問題なので 409 で返す。
-PASSWORD_RESET_REJECTED = ("NotAuthorizedException", "InvalidParameterException")
-
-RESULT_OK = "ok"
 
 logger = get_logger()
 app = APIGatewayHttpResolver(strip_prefixes=[API_PREFIX])
 response.install_error_handlers(app)
 
 
-class ValidationError(Exception):
-    """入力が不正（400）。"""
-
-
-class UserNotFoundError(Exception):
-    """`sub` に一致するユーザーが居ない（404）。"""
-
-
-class SelfOperationError(Exception):
-    """自分自身への破壊的操作（403）。"""
-
-
-class LastAdminError(Exception):
-    """最後の admin から admin を外そうとした（409）。"""
-
-
-def _admin_claims() -> auth.Claims:
-    """呼び出し元が「今」管理者であることを確かめる。
-
-    クレームの `cognito:groups` だけでは、admin を外された人・無効化された人が
-    ID トークンの残り寿命（最大 60 分）のあいだ通ってしまう。ここは他人の権限を
-    書き換えられる API なので、Cognito の現在の状態も毎回引く。
-    """
-    claims = auth.get_claims(app.current_event.raw_event)
-    auth.require_group(claims, auth.ADMIN_GROUP)
-    _require_current_admin(claims)
-    return claims
-
-
-def _require_current_admin(claims: auth.Claims) -> None:
-    caller = cognito.find_by_sub(claims.sub)
-    if caller is None:
-        _reject_caller(claims, "USER_NOT_FOUND")
-    if not cognito.is_enabled(caller["Username"]):
-        _reject_caller(claims, "DISABLED")
-    if cognito.ADMIN_GROUP not in cognito.groups_of(caller["Username"]):
-        _reject_caller(claims, "NOT_IN_GROUP")
-
-
-def _reject_caller(claims: auth.Claims, reason: str) -> NoReturn:
-    """クレームは admin だが Cognito の現在状態が伴わない呼び出しを断る。"""
-    logger.warning(
-        "forbidden",
-        {
-            "operation": "authorize",
-            "actor_sub": claims.sub,
-            "actor_email": claims.email,
-            "result": reason,
-        },
-    )
-    raise auth.ForbiddenError(NOT_ADMIN_MESSAGE)
-
-
-def _body() -> dict:
-    raw = app.current_event.body
+def _caller() -> UserContext:
+    """呼び出し元が「今」有効な admin であることを確かめる (ADR D9)。"""
+    claims, user = identity.require_user(app.current_event.raw_event)
     try:
-        parsed = json.loads(raw) if raw else None
-    except json.JSONDecodeError as error:
-        raise ValidationError("リクエスト本文が JSON ではありません") from error
-    if not isinstance(parsed, dict):
-        raise ValidationError("リクエスト本文は JSON オブジェクトで指定してください")
-    return parsed
-
-
-def _bool_field(payload: dict, name: str) -> bool:
-    """真偽値のフィールド。文字列 `"false"` のような truthy な値は受け付けない。"""
-    value = payload.get(name)
-    if not isinstance(value, bool):
-        raise ValidationError(f"{name} は真偽値で指定してください")
-    return value
-
-
-def _audit(operation: str, claims: auth.Claims, target: dict | None, result: str = RESULT_OK, **extra) -> None:
-    """操作の証跡。`target` は Cognito のユーザー、`result` は ok か拒否コード。"""
-    logger.info(
-        operation,
-        {
-            "operation": operation,
-            "actor_sub": claims.sub,
-            "actor_email": claims.email,
-            "target_sub": cognito.attribute(target, cognito.SUB_ATTRIBUTE) if target else None,
-            "target_email": cognito.attribute(target, cognito.EMAIL_ATTRIBUTE) if target else None,
-            "result": result,
-            **extra,
-        },
-    )
-
-
-def _target(sub: str) -> dict:
-    user = cognito.find_by_sub(sub)
-    if user is None:
-        raise UserNotFoundError(USER_NOT_FOUND_MESSAGE)
+        admin_guard.require_admin(claims, user, cognito.client())
+    except ForbiddenError as exc:
+        logger.warning(
+            "forbidden", {"operation": "authorize", "actor_user_id": user.user_id, "result": getattr(exc, "code", "")}
+        )
+        raise
     return user
 
 
-def _reject_self(operation: str, claims: auth.Claims, target: dict) -> None:
-    if cognito.attribute(target, cognito.SUB_ATTRIBUTE) != claims.sub:
-        return
-    _audit(operation, claims, target, SELF_OPERATION_FORBIDDEN)
-    raise SelfOperationError(SELF_OPERATION_MESSAGE)
+def _event() -> dict:
+    return app.current_event.raw_event
 
 
-def _reject_last_admin(operation: str, claims: auth.Claims, target: dict) -> None:
-    """admin が対象 1 人だけなら解除を断る。
-
-    呼び出し元も現在の admin なので通常は 2 人以上いて到達しない。認可の作りが変わったときに
-    「最後の 1 人を外す」経路が開かないための多重防御として残す。
-    """
-    admins = cognito.admin_subs()
-    if admins != {cognito.attribute(target, cognito.SUB_ATTRIBUTE)}:
-        return
-    _audit(operation, claims, target, LAST_ADMIN)
-    raise LastAdminError(LAST_ADMIN_MESSAGE)
+def _body() -> dict:
+    return validation.body(app.current_event.body)
 
 
 @app.get("/health")
 def health() -> dict:
-    _admin_claims()
+    _caller()
     return response.ok({"status": "ok"})
 
 
 @app.get("/users")
 def get_users() -> dict:
-    claims = _admin_claims()
-    admins = cognito.admin_subs()
-    users = sorted(
-        (cognito.to_view(user, admins) for user in cognito.list_users()),
-        key=lambda user: user["email"],
-    )
-    _audit("list_users", claims, None, count=len(users))
-    return response.ok({"users": users, "self_sub": claims.sub})
+    caller = _caller()
+    rows = views.list_users()
+    logger.info("list_users", {"operation": "list_users", "actor_user_id": caller.user_id, "count": len(rows)})
+    return response.ok({"users": rows, "self_user_id": caller.user_id})
 
 
-@app.put("/users/<sub>/admin")
-def put_admin(sub: str) -> dict:
-    claims = _admin_claims()
-    admin = _bool_field(_body(), "admin")
-    operation = "grant_admin" if admin else "revoke_admin"
-    target = _target(sub)
-    # 付与も拒否する。admin を外された本人がクレームの残り時間で自分へ戻せてしまうため
-    # （正常系では自分は既に admin なので、拒んでも機能を失わない）。
-    _reject_self(operation, claims, target)
-    if not admin:
-        _reject_last_admin(operation, claims, target)
-    cognito.set_admin(target["Username"], admin)
-    _audit(operation, claims, target)
-    return response.ok({"sub": cognito.attribute(target, cognito.SUB_ATTRIBUTE), "is_admin": admin})
+@app.post("/users")
+def post_users() -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(users.invite(caller, _body(), _event())), 201)
 
 
-@app.put("/users/<sub>/enabled")
-def put_enabled(sub: str) -> dict:
-    claims = _admin_claims()
-    enabled = _bool_field(_body(), "enabled")
-    operation = "enable_user" if enabled else "disable_user"
-    target = _target(sub)
-    if not enabled:
-        _reject_self(operation, claims, target)
-    cognito.set_enabled(target["Username"], enabled)
-    _audit(operation, claims, target)
-    return response.ok({"sub": cognito.attribute(target, cognito.SUB_ATTRIBUTE), "enabled": enabled})
+@app.get("/users/<user_id>")
+def get_user(user_id: str) -> dict:
+    _caller()
+    return response.ok(views.detail(user_id))
 
 
-@app.post("/users/<sub>/password-reset")
-def post_password_reset(sub: str) -> dict | Response:
-    """本人へリセットコードをメールする。新しいパスワードは本人が画面から設定する。"""
-    claims = _admin_claims()
-    operation = "reset_password"
-    target = _target(sub)
-    try:
-        cognito.reset_password(target["Username"])
-    except ClientError as error:
-        code = error.response["Error"]["Code"]
-        if code not in PASSWORD_RESET_REJECTED:
-            raise
-        _audit(operation, claims, target, PASSWORD_RESET_NOT_ALLOWED, reason=code)
-        return response.error(PASSWORD_RESET_NOT_ALLOWED, PASSWORD_RESET_MESSAGE, 409)
-    _audit(operation, claims, target)
-    return response.ok(
-        {
-            "sub": cognito.attribute(target, cognito.SUB_ATTRIBUTE),
-            "email": cognito.attribute(target, cognito.EMAIL_ATTRIBUTE),
-        }
-    )
+@app.put("/users/<user_id>/profile")
+def put_profile(user_id: str) -> dict:
+    return response.ok(users.update_profile(_caller(), user_id, _body(), _event()))
 
 
-@app.delete("/users/<sub>")
-def delete_user(sub: str) -> Response:
-    claims = _admin_claims()
-    operation = "delete_user"
-    target = _target(sub)
-    _reject_self(operation, claims, target)
-    cognito.delete_user(target["Username"])
-    _audit(operation, claims, target)
-    return Response(status_code=204, content_type=response.CONTENT_TYPE_JSON, body="")
+@app.put("/users/<user_id>/email")
+def put_email(user_id: str) -> dict:
+    return response.ok(email_change.change_email(_caller(), user_id, _body(), _event()))
 
 
-@app.exception_handler(ValidationError)
-def handle_validation_error(exc: ValidationError) -> Response:
-    return response.error(VALIDATION_ERROR, str(exc), 400)
+@app.post("/users/<user_id>/suspend")
+def post_suspend(user_id: str) -> dict:
+    return response.ok(users.suspend(_caller(), user_id, _body(), _event()))
 
 
-@app.exception_handler(UserNotFoundError)
-def handle_user_not_found(exc: UserNotFoundError) -> Response:
-    return response.error(USER_NOT_FOUND, str(exc), 404)
+@app.post("/users/<user_id>/restore")
+def post_restore(user_id: str) -> dict:
+    return response.ok(users.restore(_caller(), user_id, _body(), _event()))
 
 
-@app.exception_handler(SelfOperationError)
-def handle_self_operation(exc: SelfOperationError) -> Response:
-    return response.error(SELF_OPERATION_FORBIDDEN, str(exc), 403)
+@app.post("/users/<user_id>/reinvite")
+def post_reinvite(user_id: str) -> dict:
+    return response.ok(users.reinvite(_caller(), user_id, _body(), _event()))
 
 
-@app.exception_handler(LastAdminError)
-def handle_last_admin(exc: LastAdminError) -> Response:
-    return response.error(LAST_ADMIN, str(exc), 409)
+@app.post("/users/<user_id>/admin-activation")
+def post_admin_activation(user_id: str) -> dict:
+    return response.ok(users.activate_admin(_caller(), user_id, _body(), _event()))
+
+
+@app.post("/users/<user_id>/temporary-password")
+def post_temporary_password(user_id: str) -> dict:
+    return response.ok(users.issue_temporary_password(_caller(), user_id, _event()))
+
+
+@app.put("/users/<user_id>/admin")
+def put_admin(user_id: str) -> dict:
+    return response.ok(users.revoke_admin(_caller(), user_id, _body(), _event()))
+
+
+def _status_query() -> str:
+    query = parse_qs(app.current_event.raw_query_string, keep_blank_values=True)
+    status = query.get("status", ["active"])
+    if len(status) != 1:
+        raise errors.validation("status は一つだけ指定してください")
+    return status[0]
+
+
+@app.get("/device-periods")
+def get_device_periods() -> dict:
+    _caller()
+    return response.ok({"device_periods": device_periods.list_periods(_status_query())})
+
+
+@app.post("/device-periods")
+def post_device_periods() -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(device_periods.start(caller, _body(), _event())), 201)
+
+
+@app.get("/device-periods/<period_id>")
+def get_device_period(period_id: str) -> dict:
+    _caller()
+    return response.ok(device_periods.detail(period_id))
+
+
+@app.put("/device-periods/<period_id>/access")
+def put_device_period_access(period_id: str) -> dict:
+    return response.ok(device_periods.set_access(_caller(), period_id, _body(), _event()))
+
+
+@app.post("/device-periods/<period_id>/end")
+def end_device_period(period_id: str) -> dict:
+    return response.ok(device_periods.end(_caller(), period_id, _event()))
+
+
+@app.post("/device-periods/<period_id>/assignments")
+def post_assignment(period_id: str) -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(assignments.add(caller, period_id, _body(), _event())), 201)
+
+
+@app.post("/device-periods/<period_id>/assignments/<assignment_id>/end")
+def end_assignment(period_id: str, assignment_id: str) -> dict:
+    return response.ok(assignments.end(_caller(), period_id, assignment_id, _event()))
+
+
+@app.post("/device-periods/<period_id>/grants")
+def post_grant(period_id: str) -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(grants.add(caller, period_id, _body(), _event())), 201)
+
+
+@app.post("/device-periods/<period_id>/grants/<grant_id>/end")
+def end_grant(period_id: str, grant_id: str) -> dict:
+    return response.ok(grants.end(_caller(), period_id, grant_id, _event()))
+
+
+@app.get("/groups")
+def get_groups() -> dict:
+    _caller()
+    return response.ok({"groups": groups.list_groups(_status_query())})
+
+
+@app.post("/groups")
+def post_groups() -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(groups.create(caller, _body(), _event())), 201)
+
+
+@app.get("/groups/<group_id>")
+def get_group(group_id: str) -> dict:
+    _caller()
+    return response.ok(groups.detail(group_id))
+
+
+@app.put("/groups/<group_id>")
+def put_group(group_id: str) -> dict:
+    return response.ok(groups.update(_caller(), group_id, _body(), _event()))
+
+
+@app.post("/groups/<group_id>/end")
+def end_group(group_id: str) -> dict:
+    return response.ok(groups.end(_caller(), group_id, _event()))
+
+
+@app.post("/groups/<group_id>/members")
+def post_group_member(group_id: str) -> Response:
+    caller = _caller()
+    return response.json_response(response.ok(group_members.add(caller, group_id, _body(), _event())), 201)
+
+
+@app.post("/groups/<group_id>/members/<user_id>/remove")
+def remove_group_member(group_id: str, user_id: str) -> dict:
+    return response.ok(group_members.remove(_caller(), group_id, user_id, _event()))
+
+
+@app.exception_handler(errors.ApiError)
+def handle_api_error(exc: errors.ApiError) -> Response:
+    return response.error(exc.code, str(exc), exc.status)
 
 
 @LambdaLogger.contextualize

@@ -310,3 +310,9 @@ def test_prod_samconfig_overrides_every_ssm_key_name(render):
     for name, dev_key in SSM_PARAMETER_DEFAULTS.items():
         assert f"{name}={dev_key.replace('/dev/', '/prod/')}" in prod
         assert f"{name}={dev_key}" not in prod
+
+
+def test_http_api_has_default_throttling(app_template):
+    settings = app_template["Resources"]["HttpApi"]["Properties"].get("DefaultRouteSettings", {})
+    assert settings.get("ThrottlingRateLimit") == 20
+    assert settings.get("ThrottlingBurstLimit") == 40

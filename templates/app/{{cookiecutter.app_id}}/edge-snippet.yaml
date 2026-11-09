@@ -1,4 +1,4 @@
-# infra/edge/template.yaml に転記する断片。
+# infra/edge/template.yaml に転記する断片（ADD-APP-GUIDE「7. edge と deploy-edge.sh に 1 組を加える」 / 設計 5.2）。
 # 転記後に scripts/deploy-edge.sh へこのアプリの SSM 解決を足し、scripts/deploy-edge.sh {env}
 # でデプロイする。admin-users の 2 行（ADMIN_USERS_API_DOMAIN_PARAM の定義と OVERRIDES への
 # 連結）が参照例。
@@ -12,7 +12,7 @@
 #（SSM から解決されるのは Type: AWS::SSM::Parameter::Value<String> のパラメータだけ）。
 #
 # origin も behavior も「リストの要素ごとに !If」で書く。edge テンプレートの Origins /
-# CacheBehaviors は既にこの形なので、下をそのまま末尾に足せばよい。
+# CacheBehaviors は既にこの形（ で書き換え済み）なので、下をそのまま末尾に足せばよい。
 #     CacheBehaviors: !If [HasXxxApi, [<behavior>], !Ref AWS::NoValue]
 # のようにリスト全体を !If にすると、後から足した behavior が他アプリの Condition に
 # 巻き込まれる。origin だけ消えて behavior が残ればデプロイが失敗し、CacheBehaviors ごと

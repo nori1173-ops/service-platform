@@ -6,8 +6,9 @@ Description: service-platform app admin-users - HTTP API / api Lambda と apps/a
 # SSM 型パラメータの Default は dev のキー名。prod は samconfig の [production.deploy.parameters] で
 # キー名（値ではない）を上書きする。
 #
-# このアプリは Cognito User Pool を直接操作するだけで、自前の DynamoDB テーブル・バッチ・
-# ステートマシン・通知は持たない（雛形から削除済み）。操作の証跡は Lambda の構造化ログに残す。
+# このアプリは Cognito User Pool と core の台帳 (利用者の行) を書き換え、core の監査に追記する。
+# 自前の DynamoDB テーブル・バッチ・ステートマシン・通知は持たない（雛形から削除済み）。
+# 操作の証跡は監査テーブル (ADR D12) と Lambda の構造化ログに残す。
 
 Parameters:
   ProjectName:
@@ -50,6 +51,14 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<String>
     Default: /service-platform/dev/shared/layer-arn
     Description: 共通レイヤ service_platform のバージョン付き ARN
+  LedgerTableName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/ledger/table-name
+    Description: 台帳のテーブル名（設計 4.2）。環境変数 LEDGER_TABLE と IAM の Resource に使う
+  AuditTableName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/audit/table-name
+    Description: 監査のテーブル名（設計 4.2）。環境変数 AUDIT_TABLE と IAM の Resource に使う
 
 Globals:
   Function:
@@ -64,12 +73,17 @@ Globals:
         ENV: !Ref Env
         LOG_LEVEL: !Ref LogLevel
         USER_POOL_ID: !Ref UserPoolId
+        LEDGER_TABLE: !Ref LedgerTableName
+        AUDIT_TABLE: !Ref AuditTableName
 
 Resources:
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
       Auth:
         Authorizers:
           CognitoJwtAuthorizer:
@@ -128,14 +142,38 @@ Resources:
                 - cognito-idp:ListUsers
                 - cognito-idp:ListUsersInGroup
                 - cognito-idp:AdminGetUser
+                - cognito-idp:AdminGetUserAuthFactors
                 - cognito-idp:AdminListGroupsForUser
                 - cognito-idp:AdminAddUserToGroup
                 - cognito-idp:AdminRemoveUserFromGroup
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminUpdateUserAttributes
+                - cognito-idp:AdminSetUserPassword
                 - cognito-idp:AdminEnableUser
                 - cognito-idp:AdminDisableUser
-                - cognito-idp:AdminResetUserPassword
+                - cognito-idp:AdminUserGlobalSignOut
                 - cognito-idp:AdminDeleteUser
               Resource: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+            # 台帳の条件付きの読み書き (LOGIN・CURRENT の削除を含む) と、一覧のための GSI1 の Query。
+            # ConditionCheckItem は呼び出し元がまだ有効な admin であることを同じトランザクションで確かめるため
+            - Sid: ReadAndWriteLedger
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:ConditionCheckItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LedgerTableName}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LedgerTableName}/index/GSI1
+            # 監査は追記だけ（ADR D12）
+            - Sid: AppendAudit
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuditTableName}
             - Sid: ReadOriginVerifyParameter
               Effect: Allow
               Action:

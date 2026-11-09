@@ -63,7 +63,7 @@ def make_message(**slack_extra) -> dict:
     slack.update(slack_extra)
     return {
         "schema": "service-platform.notify.v1",
-        "message_id": "11111111-2222-3333-4444-555555555555",
+        "message_id": "11111111-2222-3333-4444-210000000001",
         "app": "sample-report",
         "channels": ["slack"],
         "slack": slack,

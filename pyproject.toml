@@ -20,8 +20,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["shared/tests", "infra/core/tests", "tests/infra", "apps"]
-pythonpath = ["shared/layers", "infra/core/src", "apps/admin-users/functions"]
+testpaths = ["shared/tests", "infra/core/tests", "tests/infra", "tests/scripts", "apps"]
+pythonpath = ["shared/layers", "infra/core/src", "apps/admin-users/functions", "apps/base/functions", "scripts"]
 addopts = "-ra --strict-markers --import-mode=importlib"
 filterwarnings = ["error::DeprecationWarning:service_platform.*"]
 

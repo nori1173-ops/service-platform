@@ -1,70 +1,39 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
-  confirmResetPassword,
   confirmSignIn,
-  confirmSignUp,
   fetchAuthSession,
+  fetchMFAPreference,
   getCurrentUser,
-  resendSignUpCode,
-  resetPassword,
+  setUpTOTP,
   signIn,
   signOut,
-  signUp,
+  updateMFAPreference,
+  verifyTOTPSetup,
   type SignInOutput,
 } from 'aws-amplify/auth'
 import { Hub } from 'aws-amplify/utils'
-import { PASSWORD_POLICY_MESSAGE } from '@/utils/password'
+import { isPasskeySignInError, toJaMessage } from '@/utils/authErrors'
+import { useDeviceStore } from './device'
+import { useLandingStore } from './landing'
+import { useMeStore } from './me'
+import { usePasskeysStore } from './passkeys'
 
 const TOTP_ISSUER = 'SERVICE-PLATFORM'
 
-const GENERIC_ERROR = '予期しないエラーが発生しました'
-
-const AMPLIFY_ERROR_MESSAGES: Record<string, string> = {
-  NotAuthorizedException: 'メールアドレスまたはパスワードが正しくありません',
-  UserNotFoundException: 'メールアドレスまたはパスワードが正しくありません',
-  UserNotConfirmedException: 'アカウントが確認されていません。確認コードを入力してください',
-  PasswordResetRequiredException:
-    'パスワードの再設定が必要です。「パスワードをお忘れの方」から手続きしてください',
-  TooManyRequestsException: 'アクセスが集中しています。しばらく時間をおいてから再試行してください',
-  TooManyFailedAttemptsException:
-    '失敗が続いたため一時的に制限されています。しばらく時間をおいてから再試行してください',
-  LimitExceededException: '試行回数の上限に達しました。しばらく時間をおいてから再試行してください',
-  CodeMismatchException: '確認コードが正しくありません',
-  ExpiredCodeException: '確認コードの有効期限が切れています。コードを再送してください',
-  CodeDeliveryFailureException: '確認コードを送信できませんでした。メールアドレスを確認してください',
-  EnableSoftwareTokenMFAException: '認証コードが正しくありません。認証アプリの表示を確認してください',
-  SoftwareTokenMFANotFoundException:
-    '認証アプリが登録されていません。情報システム担当へ連絡してください',
-  InvalidPasswordException: PASSWORD_POLICY_MESSAGE,
-  InvalidParameterException: '入力内容が正しくありません',
-  UsernameExistsException: 'このメールアドレスは既に登録されています',
-  UserLambdaValidationException: '登録用メールアドレス（@example.co.jp）でのみ登録できます',
-  UserAlreadyAuthenticatedException:
-    '既にサインインしています。サインアウトしてからやり直してください',
-  NetworkError: 'ネットワークに接続できませんでした。通信環境を確認してください',
-}
+/** お客様と社員がサインインに使う要素 (ADR D1)。パスワードは admin のサインインだけで使う */
+export type SignInFactor = 'WEB_AUTHN' | 'EMAIL_OTP'
 
 export type Pending =
-  | { kind: 'totp-setup'; setupUri: string; sharedSecret: string }
+  | { kind: 'select-factor'; factors: string[] }
+  | { kind: 'email-code'; destination?: string }
   | { kind: 'totp-code' }
   | { kind: 'new-password' }
-  | { kind: 'confirm-signup'; username: string }
   | null
 
-/** 辞書に無い Cognito 例外は、原因追跡のために例外名だけ控えめに添える */
-function toJaMessage(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return GENERIC_ERROR
-  }
-  const known = AMPLIFY_ERROR_MESSAGES[error.name]
-  if (known) {
-    return known
-  }
-  if (!error.name || error.name === 'Error') {
-    return error.message || GENERIC_ERROR
-  }
-  return `${GENERIC_ERROR}（${error.name}）`
+export interface TotpSetup {
+  setupUri: string
+  sharedSecret: string
 }
 
 /** ID トークンの `cognito:groups` は配列でも `"[admin, ops]"` 形式の文字列でも来る */
@@ -89,14 +58,38 @@ export const useAuthStore = defineStore('auth', () => {
   const isLoading = ref(false)
   const error = ref<string | null>(null)
   const pending = ref<Pending>(null)
+  /** サインインを始めたメールアドレス。メールのコードの再送 (サインインのやり直し) に使う */
+  const signInEmail = ref<string | null>(null)
+  /** パスキーでのサインインが取り消し・非対応などで使えなかった */
+  const passkeyFailed = ref(false)
+  const availableFactors = ref<string[] | null>(null)
+  /** 直前のサインインを済ませた要素。メールのコードで入ったらパスキーの登録を勧める */
+  const lastFactor = ref<SignInFactor | 'PASSWORD' | null>(null)
+  /** 認証セッションの世代。サインアウトとサインインの完了で進め、待機の前後で同じ利用者かを見分ける */
+  const session = ref(0)
+  let attempt: SignInFactor | 'PASSWORD' | null = null
+  let signInRevision = 0
 
   const isAuthenticated = computed(() => email.value !== null)
   const isAdmin = computed(() => groups.value.includes('admin'))
+  const passwordOnly = computed(() => {
+    const current = pending.value
+    return (
+      current?.kind === 'select-factor' &&
+      !current.factors.some((factor) => factor === 'WEB_AUTHN' || factor === 'EMAIL_OTP')
+    )
+  })
 
   function clear(): void {
+    session.value += 1
     email.value = null
     groups.value = []
     pending.value = null
+    availableFactors.value = null
+    useMeStore().clear()
+    usePasskeysStore().clear()
+    useDeviceStore().reset()
+    useLandingStore().clear()
   }
 
   async function checkAuth(): Promise<void> {
@@ -112,19 +105,26 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function route(result: SignInOutput, username: string): Promise<void> {
+  async function route(result: SignInOutput): Promise<void> {
     const step = result.nextStep
     switch (step.signInStep) {
       case 'DONE':
+        session.value += 1
         pending.value = null
+        lastFactor.value = attempt
+        useMeStore().clear()
+        usePasskeysStore().clear()
+        useDeviceStore().reset()
+        useLandingStore().clear()
         await checkAuth()
         return
-      case 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP':
-        pending.value = {
-          kind: 'totp-setup',
-          setupUri: step.totpSetupDetails.getSetupUri(TOTP_ISSUER, username).toString(),
-          sharedSecret: step.totpSetupDetails.sharedSecret,
-        }
+      case 'CONTINUE_SIGN_IN_WITH_FIRST_FACTOR_SELECTION':
+        availableFactors.value = [...(step.availableChallenges ?? [])]
+        pending.value = { kind: 'select-factor', factors: [...(step.availableChallenges ?? [])] }
+        return
+      case 'CONFIRM_SIGN_IN_WITH_EMAIL_CODE':
+        attempt = 'EMAIL_OTP'
+        pending.value = { kind: 'email-code', destination: step.codeDeliveryDetails?.destination }
         return
       case 'CONFIRM_SIGN_IN_WITH_TOTP_CODE':
         pending.value = { kind: 'totp-code' }
@@ -132,121 +132,144 @@ export const useAuthStore = defineStore('auth', () => {
       case 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED':
         pending.value = { kind: 'new-password' }
         return
-      case 'CONFIRM_SIGN_UP':
-        pending.value = { kind: 'confirm-signup', username }
+      case 'CONTINUE_SIGN_IN_WITH_MFA_SELECTION':
+        await route(await confirmSignIn({ challengeResponse: 'TOTP' }))
         return
-      case 'CONTINUE_SIGN_IN_WITH_MFA_SELECTION': {
-        const next = await confirmSignIn({ challengeResponse: 'TOTP' })
-        await route(next, username)
-        return
-      }
       default:
         throw new Error(`許可されていないサインインステップ: ${step.signInStep}`)
     }
   }
 
-  async function login(username: string, password: string): Promise<void> {
+  async function run<T>(action: () => Promise<T>, options: { emailCode?: boolean } = {}): Promise<T> {
+    const revision = signInRevision
     isLoading.value = true
     error.value = null
+    try {
+      return await action()
+    } catch (e: unknown) {
+      error.value = toJaMessage(e, options)
+      passkeyFailed.value = isPasskeySignInError(e)
+      if (passkeyFailed.value && availableFactors.value === null && signInEmail.value) {
+        try {
+          // 要素を選ばず候補だけを照会する。メールの送信は要求しない。
+          const result = await signIn({ username: signInEmail.value, options: { authFlowType: 'USER_AUTH' } })
+          if (revision === signInRevision && result.nextStep.signInStep === 'CONTINUE_SIGN_IN_WITH_FIRST_FACTOR_SELECTION') {
+            availableFactors.value = [...(result.nextStep.availableChallenges ?? [])]
+          }
+        } catch {
+          if (revision === signInRevision) availableFactors.value = null
+        }
+      }
+      throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /** メールアドレスでサインインを始める (USER_AUTH)。既定はパスキーを第一候補にする (ADR D1) */
+  function startSignIn(username: string, preferred: SignInFactor = 'WEB_AUTHN'): Promise<void> {
+    signInRevision += 1
     pending.value = null
-    try {
-      const result = await signIn({ username, password })
-      await route(result, username)
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+    passkeyFailed.value = false
+    availableFactors.value = null
+    signInEmail.value = username
+    attempt = preferred
+    return run(async () => {
+      const result = await signIn({
+        username,
+        options: { authFlowType: 'USER_AUTH', preferredChallenge: preferred },
+      })
+      await route(result)
+    })
   }
 
-  async function submitChallenge(response: string, username: string): Promise<void> {
-    isLoading.value = true
-    error.value = null
-    try {
-      const result = await confirmSignIn({ challengeResponse: response })
-      await route(result, username)
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+  /** Cognito の候補 (SELECT_CHALLENGE) から要素を選ぶ */
+  function selectFactor(factor: SignInFactor): Promise<void> {
+    passkeyFailed.value = false
+    attempt = factor
+    return run(async () => {
+      await route(await confirmSignIn({ challengeResponse: factor }))
+    })
   }
 
-  async function register(username: string, password: string): Promise<void> {
-    isLoading.value = true
-    error.value = null
-    try {
-      const result = await signUp({
+  function submitEmailCode(code: string): Promise<void> {
+    return run(async () => {
+      await route(await confirmSignIn({ challengeResponse: code }))
+    }, { emailCode: true })
+  }
+
+  /** Amplify 6.20 ではメールのコードの送り直しはサインインのやり直しになる */
+  function resendEmailCode(): Promise<void> {
+    const username = signInEmail.value
+    if (!username) {
+      return Promise.resolve()
+    }
+    return startSignIn(username, 'EMAIL_OTP')
+  }
+
+  /** admin のサインイン (パスワード + TOTP、ADR D9)。パスワードはストアに残さない */
+  function startAdminSignIn(username: string, password: string): Promise<void> {
+    signInRevision += 1
+    pending.value = null
+    passkeyFailed.value = false
+    availableFactors.value = null
+    signInEmail.value = username
+    attempt = 'PASSWORD'
+    return run(async () => {
+      const result = await signIn({
         username,
         password,
-        options: { userAttributes: { email: username } },
+        options: { authFlowType: 'USER_AUTH', preferredChallenge: 'PASSWORD_SRP' },
       })
-      pending.value = result.isSignUpComplete ? null : { kind: 'confirm-signup', username }
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+      await route(result)
+    })
   }
 
-  async function confirmRegistration(username: string, code: string): Promise<void> {
-    isLoading.value = true
-    error.value = null
-    try {
-      await confirmSignUp({ username, confirmationCode: code })
-      pending.value = null
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+  function submitTotp(code: string): Promise<void> {
+    return run(async () => {
+      await route(await confirmSignIn({ challengeResponse: code }))
+    })
   }
 
-  async function resendCode(username: string): Promise<void> {
-    isLoading.value = true
-    error.value = null
-    try {
-      await resendSignUpCode({ username })
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+  function submitNewPassword(newPassword: string): Promise<void> {
+    return run(async () => {
+      await route(await confirmSignIn({ challengeResponse: newPassword }))
+    })
   }
 
-  async function requestPasswordReset(username: string): Promise<void> {
-    isLoading.value = true
+  /** 途中のサインインを捨てる。入口 (/login と /login/admin) を開くたびにも呼び、前の入口の段を持ち越さない */
+  function cancelSignIn(): void {
+    signInRevision += 1
+    pending.value = null
     error.value = null
-    try {
-      await resetPassword({ username })
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+    passkeyFailed.value = false
+    signInEmail.value = null
+    availableFactors.value = null
+    attempt = null
   }
 
-  async function submitPasswordReset(
-    username: string,
-    code: string,
-    newPassword: string,
-  ): Promise<void> {
-    isLoading.value = true
-    error.value = null
-    try {
-      await confirmResetPassword({ username, confirmationCode: code, newPassword })
-    } catch (e: unknown) {
-      error.value = toJaMessage(e)
-      throw e
-    } finally {
-      isLoading.value = false
-    }
+  /** admin の TOTP の登録を始める。共有の秘密は呼び出し元の画面だけが持ち、ストアに残さない */
+  function beginTotpSetup(): Promise<TotpSetup> {
+    return run(async () => {
+      const details = await setUpTOTP()
+      return {
+        setupUri: details.getSetupUri(TOTP_ISSUER, email.value ?? undefined).toString(),
+        sharedSecret: details.sharedSecret,
+      }
+    })
+  }
+
+  /** 認証アプリのコードを確かめてから、TOTP を優先の MFA にする (ADR D9) */
+  function confirmTotpSetup(code: string): Promise<void> {
+    return run(async () => {
+      await verifyTOTPSetup({ code })
+      await updateMFAPreference({ totp: 'PREFERRED' })
+    })
+  }
+
+  async function totpEnabled(): Promise<boolean> {
+    const preference = await fetchMFAPreference()
+    return preference.enabled?.includes('TOTP') ?? false
   }
 
   async function logout(): Promise<void> {
@@ -273,16 +296,26 @@ export const useAuthStore = defineStore('auth', () => {
     isLoading,
     error,
     pending,
+    signInEmail,
+    passkeyFailed,
+    availableFactors,
+    lastFactor,
+    session,
     isAuthenticated,
     isAdmin,
+    passwordOnly,
     checkAuth,
-    login,
-    submitChallenge,
-    register,
-    confirmRegistration,
-    resendCode,
-    requestPasswordReset,
-    submitPasswordReset,
+    startSignIn,
+    selectFactor,
+    submitEmailCode,
+    resendEmailCode,
+    startAdminSignIn,
+    submitTotp,
+    submitNewPassword,
+    cancelSignIn,
+    beginTotpSetup,
+    confirmTotpSetup,
+    totpEnabled,
     logout,
   }
 })

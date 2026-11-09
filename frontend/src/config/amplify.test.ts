@@ -7,6 +7,13 @@ vi.mock('aws-amplify', () => ({ Amplify: { configure: vi.fn() } }))
 const USER_POOL_ID = 'ap-northeast-1_EXMPLpool1'
 const CLIENT_ID = 'exmplclient1'
 
+function cognitoConfig(): Record<string, unknown> {
+  const [config] = vi.mocked(Amplify.configure).mock.calls[0] as [
+    { Auth: { Cognito: Record<string, unknown> } },
+  ]
+  return config.Auth.Cognito
+}
+
 describe('configureAmplify', () => {
   beforeEach(() => {
     vi.mocked(Amplify.configure).mockClear()
@@ -23,34 +30,24 @@ describe('configureAmplify', () => {
     configureAmplify()
 
     expect(Amplify.configure).toHaveBeenCalledTimes(1)
-    expect(Amplify.configure).toHaveBeenCalledWith({
-      Auth: {
-        Cognito: expect.objectContaining({
-          userPoolId: USER_POOL_ID,
-          userPoolClientId: CLIENT_ID,
-        }),
-      },
+    expect(cognitoConfig()).toMatchObject({
+      userPoolId: USER_POOL_ID,
+      userPoolClientId: CLIENT_ID,
     })
   })
 
   it('loginWith.email が true', () => {
     configureAmplify()
 
-    expect(Amplify.configure).toHaveBeenCalledWith(
-      expect.objectContaining({
-        Auth: { Cognito: expect.objectContaining({ loginWith: { email: true } }) },
-      }),
-    )
+    expect(cognitoConfig().loginWith).toEqual({ email: true })
   })
 
-  it("signUpVerificationMethod が 'code'", () => {
+  // 招待制なのでサインアップの設定を持たない (ADR D2)
+  it('signUpVerificationMethod と userAttributes を渡さない', () => {
     configureAmplify()
 
-    expect(Amplify.configure).toHaveBeenCalledWith(
-      expect.objectContaining({
-        Auth: { Cognito: expect.objectContaining({ signUpVerificationMethod: 'code' }) },
-      }),
-    )
+    expect(cognitoConfig()).not.toHaveProperty('signUpVerificationMethod')
+    expect(cognitoConfig()).not.toHaveProperty('userAttributes')
   })
 
   it('環境変数が無いとき configure を呼ばずエラーログを出す', () => {

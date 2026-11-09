@@ -38,7 +38,7 @@ SCHEMA_PATH = pathlib.Path(__file__).resolve().parents[3] / "shared" / "schemas"
 class FakeContext:
     """Powertools Idempotency が使う最小限の Lambda コンテキスト。"""
 
-    aws_request_id = "11111111-1111-1111-1111-111111111111"
+    aws_request_id = "11111111-1111-1111-1111-210000000001"
 
     @staticmethod
     def get_remaining_time_in_millis() -> int:

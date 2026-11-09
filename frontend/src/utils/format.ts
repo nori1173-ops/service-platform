@@ -38,6 +38,17 @@ export function formatDateTime(value: string | Date | null | undefined): string 
   return date ? `${formatDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}` : fallback(value)
 }
 
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000
+
+/** API の UTC の ISO 8601 (`Z`) を日本時間の YYYY-MM-DD HH:mm にする。実行環境の時差によらない */
+export function formatJst(value: string | null | undefined): string {
+  if (!value) {
+    return DASH
+  }
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? value : formatDateTime(new Date(parsed + JST_OFFSET_MS).toISOString())
+}
+
 export function formatDateTimeSeconds(value: string | Date | null | undefined): string {
   const date = toDate(value)
   return date

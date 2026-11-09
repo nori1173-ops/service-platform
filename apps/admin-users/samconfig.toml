@@ -11,7 +11,7 @@ s3_prefix = "service-platform-app-admin-users-dev"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 tags = "Project=service-platform App=admin-users Env=dev"
-parameter_overrides = "ProjectName=service-platform Env=dev LogLevel=DEBUG ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/dev/cognito/issuer UserPoolClientId=/service-platform/dev/cognito/client-id UserPoolId=/service-platform/dev/cognito/user-pool-id SharedLayerArn=/service-platform/dev/shared/layer-arn"
+parameter_overrides = "ProjectName=service-platform Env=dev LogLevel=DEBUG ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/dev/cognito/issuer UserPoolClientId=/service-platform/dev/cognito/client-id UserPoolId=/service-platform/dev/cognito/user-pool-id SharedLayerArn=/service-platform/dev/shared/layer-arn LedgerTableName=/service-platform/dev/ledger/table-name AuditTableName=/service-platform/dev/audit/table-name"
 
 [production.build.parameters]
 use_container = true
@@ -26,4 +26,4 @@ s3_prefix = "service-platform-app-admin-users-prod"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 tags = "Project=service-platform App=admin-users Env=prod"
-parameter_overrides = "ProjectName=service-platform Env=prod LogLevel=INFO ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/prod/cognito/issuer UserPoolClientId=/service-platform/prod/cognito/client-id UserPoolId=/service-platform/prod/cognito/user-pool-id SharedLayerArn=/service-platform/prod/shared/layer-arn"
+parameter_overrides = "ProjectName=service-platform Env=prod LogLevel=INFO ExamplePowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1 PowertoolsLayerArn=arn:aws:lambda:ap-northeast-1:210000000001:layer:AWSLambdaPowertoolsPythonV3-python313-x86_64:37 UserPoolIssuer=/service-platform/prod/cognito/issuer UserPoolClientId=/service-platform/prod/cognito/client-id UserPoolId=/service-platform/prod/cognito/user-pool-id SharedLayerArn=/service-platform/prod/shared/layer-arn LedgerTableName=/service-platform/prod/ledger/table-name AuditTableName=/service-platform/prod/audit/table-name"

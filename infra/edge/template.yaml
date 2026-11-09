@@ -29,6 +29,10 @@ Parameters:
     Type: String
     Default: arn:aws:acm:us-east-1:210000000001:certificate/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
     Description: 既存の共有 ACM 証明書（*.example-cloud.com、us-east-1）。新規発行はしない
+  WebAclArn:
+    Type: String
+    Default: ""
+    Description: us-east-1 の CloudFront 用 web ACL の ARN。空なら関連付けない
   OriginVerifySecret:
     Type: String
     NoEcho: true
@@ -37,9 +41,14 @@ Parameters:
     Type: String
     Default: ""
     Description: admin-users の HTTP API ドメイン。空なら API 経路を作らない
-
+  BaseApiDomain:
+    Type: String
+    Default: ""
+    Description: 土台 base の HTTP API ドメイン（設計 4.2 の /apps/base/api-domain）。空なら API 経路を作らない
 Conditions:
+  HasWebAcl: !Not [!Equals [!Ref WebAclArn, ""]]
   HasAdminUsersApi: !Not [!Equals [!Ref AdminUsersApiDomain, ""]]
+  HasBaseApi: !Not [!Equals [!Ref BaseApiDomain, ""]]
 
 Resources:
   SpaBucket:
@@ -164,12 +173,13 @@ Resources:
       Name: !Sub '${ProjectName}-spa-fallback-${Env}'
       AutoPublish: true
       FunctionConfig:
-        Comment: SPA fallback for service-platform
+        Comment: SPA fallback for service-platform (base)
         Runtime: cloudfront-js-2.0
       # 正本は infra/edge/functions/spa-fallback.js。tests/infra/test_edge_template.py が
       # 一致を検査するので、直すときは .js 側を直してここへ貼り直す。
       FunctionCode: |
-        // infra/edge/functions/spa-fallback.js（正本。直したらテンプレートの FunctionCode に貼り直す）
+        // infra/edge/functions/spa-fallback.js（正本。変更時はテンプレートにも反映する）
+        // SPA のディープリンクを処理し、API とアセットはそのままオリジンへ渡す。
         function handler(event) {
           var req = event.request;
           if (!req.uri.startsWith('/api/') && !req.uri.includes('.')) {
@@ -177,6 +187,7 @@ Resources:
           }
           return req;
         }
+
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -193,6 +204,7 @@ Resources:
         HttpVersion: http2and3
         PriceClass: PriceClass_200
         IPV6Enabled: false
+        WebACLId: !If [HasWebAcl, !Ref WebAclArn, !Ref AWS::NoValue]
         Aliases:
           - !Ref SiteDomain
         ViewerCertificate:
@@ -213,6 +225,18 @@ Resources:
             - HasAdminUsersApi
             - Id: api-admin-users
               DomainName: !Ref AdminUsersApiDomain
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols:
+                  - TLSv1.2
+              OriginCustomHeaders:
+                - HeaderName: x-origin-verify
+                  HeaderValue: !Ref OriginVerifySecret
+            - !Ref AWS::NoValue
+          - !If
+            - HasBaseApi
+            - Id: api-base
+              DomainName: !Ref BaseApiDomain
               CustomOriginConfig:
                 OriginProtocolPolicy: https-only
                 OriginSSLProtocols:
@@ -242,6 +266,23 @@ Resources:
             - HasAdminUsersApi
             - PathPattern: /api/admin-users/*
               TargetOriginId: api-admin-users
+              ViewerProtocolPolicy: https-only
+              AllowedMethods:
+                - GET
+                - HEAD
+                - OPTIONS
+                - PUT
+                - PATCH
+                - POST
+                - DELETE
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              Compress: true
+            - !Ref AWS::NoValue
+          - !If
+            - HasBaseApi
+            - PathPattern: /api/base/*
+              TargetOriginId: api-base
               ViewerProtocolPolicy: https-only
               AllowedMethods:
                 - GET

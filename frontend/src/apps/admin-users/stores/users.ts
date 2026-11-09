@@ -2,92 +2,137 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { extractApiError } from '@/services/http'
 import { adminUsersApi } from '../api'
-import type { AdminUser } from '../types'
+import type {
+  ActivateInput,
+  InviteInput,
+  InviteResult,
+  ProfileInput,
+  ReinviteInput,
+  ReinviteResult,
+  RestoreInput,
+  TemporaryPasswordResult,
+  UserDetail,
+  UserSummary,
+} from '../types'
+
+/** 操作の結果。失敗はサーバの code と文言 (日本語) をそのまま画面に渡す */
+export type OpResult<T> = { ok: true; data: T } | { ok: false; code: string | null; message: string }
+
+const OPERATION_FAILED = '操作できませんでした。状態を確かめてからやり直してください'
+
+function failureOf(error: unknown): { ok: false; code: string | null; message: string } {
+  const api = extractApiError(error)
+  return { ok: false, code: api?.code ?? null, message: api?.message ?? OPERATION_FAILED }
+}
 
 /**
- * サーバのエラーコードを画面向けの文言に置き換える。
- * 未知のコードは API のメッセージ（日本語）をそのまま出す。
+ * 一覧と詳細は毎回サーバから読み直す (台帳と Cognito の状態が一緒に変わるため)。
+ * 一時パスワードは操作の結果で呼び出し元に返すだけで、ここには持たない。
  */
-const ERROR_MESSAGES: Record<string, string> = {
-  SELF_OPERATION_FORBIDDEN: '自分自身には操作できません。',
-  LAST_ADMIN:
-    '最後の管理者から admin を外すことはできません。先に別の管理者を追加してください。',
-  USER_NOT_FOUND: 'ユーザーが見つかりません。一覧を更新してください。',
-  PASSWORD_RESET_NOT_ALLOWED:
-    'このユーザーはパスワードをリセットできない状態です（未確認・初期パスワード・無効化など）。',
-  FORBIDDEN: 'ユーザー管理には admin 権限が必要です。',
-}
-
-function messageOf(error: unknown, fallback: string): string {
-  const api = extractApiError(error)
-  if (!api) {
-    return fallback
-  }
-  return ERROR_MESSAGES[api.code] ?? api.message
-}
-
 export const useUsersStore = defineStore('admin-users/users', () => {
-  const users = ref<AdminUser[]>([])
-  /** 呼び出し元自身の `sub`。一覧を取るまでは空 */
-  const selfSub = ref('')
+  const users = ref<UserSummary[]>([])
+  /** 呼び出し元自身の user_id。一覧を取るまでは空 */
+  const selfUserId = ref('')
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const detail = ref<UserDetail | null>(null)
+  const detailLoading = ref(false)
+  const detailError = ref<string | null>(null)
+  let detailRequest = 0
 
   async function fetch(): Promise<void> {
     loading.value = true
     error.value = null
     try {
       const response = await adminUsersApi.listUsers()
-      users.value = response?.users ?? []
-      selfSub.value = response?.self_sub ?? ''
+      users.value = response.users
+      selfUserId.value = response.self_user_id
     } catch (e: unknown) {
-      error.value = messageOf(e, 'ユーザー一覧の取得に失敗しました')
+      users.value = []
+      error.value = extractApiError(e)?.message ?? '利用者の一覧を読めませんでした'
     } finally {
       loading.value = false
     }
   }
 
   /**
-   * 更新系は結果の真偽だけを返し、成功なら一覧を取り直す。
-   * Cognito 側の状態（`status` や `updated_at`）も併せて変わるため、
-   * 手元の 1 行だけ書き換えず全体を読み直す。
+   * 最後に頼んだ利用者の応答だけを詳細にする (先に頼んだ応答が後から届いても上書きしない)。
+   * 別の利用者を読み始めたら前の詳細は捨てる (前の利用者の詳細と操作を出さない)。
    */
-  async function run(action: () => Promise<unknown>, fallback: string): Promise<boolean> {
-    loading.value = true
-    error.value = null
-    try {
-      await action()
-    } catch (e: unknown) {
-      error.value = messageOf(e, fallback)
-      return false
-    } finally {
-      loading.value = false
+  async function fetchDetail(userId: string): Promise<void> {
+    const request = ++detailRequest
+    if (detail.value?.user_id !== userId) {
+      detail.value = null
     }
-    await fetch()
-    return true
+    detailLoading.value = true
+    detailError.value = null
+    try {
+      const loaded = await adminUsersApi.getUser(userId)
+      if (request === detailRequest) {
+        detail.value = loaded
+      }
+    } catch (e: unknown) {
+      if (request === detailRequest) {
+        detail.value = null
+        detailError.value = extractApiError(e)?.message ?? '利用者の詳細を読めませんでした'
+      }
+    } finally {
+      if (request === detailRequest) {
+        detailLoading.value = false
+      }
+    }
   }
 
-  function setAdmin(sub: string, admin: boolean): Promise<boolean> {
-    return run(
-      () => adminUsersApi.setAdmin(sub, admin),
-      admin ? 'admin の付与に失敗しました' : 'admin の解除に失敗しました',
-    )
+  /** 操作の後は、成否を問わず詳細を読み直す (途中まで進んだ操作の状態を見せる) */
+  async function operate<T>(userId: string, action: () => Promise<T>): Promise<OpResult<T>> {
+    let result: OpResult<T>
+    try {
+      result = { ok: true, data: await action() }
+    } catch (e: unknown) {
+      result = failureOf(e)
+    }
+    await fetchDetail(userId)
+    if (result.ok) {
+      await fetch()
+    }
+    return result
   }
 
-  function setEnabled(sub: string, enabled: boolean): Promise<boolean> {
-    return run(
-      () => adminUsersApi.setEnabled(sub, enabled),
-      enabled ? '有効化に失敗しました' : '無効化に失敗しました',
-    )
+  async function invite(input: InviteInput): Promise<OpResult<InviteResult>> {
+    try {
+      const data = await adminUsersApi.invite(input)
+      await fetch()
+      return { ok: true, data }
+    } catch (e: unknown) {
+      return failureOf(e)
+    }
   }
 
-  function resetPassword(sub: string): Promise<boolean> {
-    return run(() => adminUsersApi.resetPassword(sub), 'パスワードリセットに失敗しました')
+  return {
+    users,
+    selfUserId,
+    loading,
+    error,
+    detail,
+    detailLoading,
+    detailError,
+    fetch,
+    fetchDetail,
+    invite,
+    updateProfile: (userId: string, input: ProfileInput) =>
+      operate(userId, () => adminUsersApi.updateProfile(userId, input)),
+    changeEmail: (userId: string, email: string) =>
+      operate(userId, () => adminUsersApi.changeEmail(userId, email)),
+    suspend: (userId: string, reason: string | null) =>
+      operate(userId, () => adminUsersApi.suspend(userId, reason)),
+    restore: (userId: string, input: RestoreInput) =>
+      operate(userId, () => adminUsersApi.restore(userId, input)),
+    reinvite: (userId: string, input: ReinviteInput): Promise<OpResult<ReinviteResult>> =>
+      operate(userId, () => adminUsersApi.reinvite(userId, input)),
+    activateAdmin: (userId: string, input: ActivateInput) =>
+      operate(userId, () => adminUsersApi.activateAdmin(userId, input)),
+    issueTemporaryPassword: (userId: string): Promise<OpResult<TemporaryPasswordResult>> =>
+      operate(userId, () => adminUsersApi.issueTemporaryPassword(userId)),
+    revokeAdmin: (userId: string) => operate(userId, () => adminUsersApi.revokeAdmin(userId)),
   }
-
-  function remove(sub: string): Promise<boolean> {
-    return run(() => adminUsersApi.removeUser(sub), 'ユーザーの削除に失敗しました')
-  }
-
-  return { users, selfSub, loading, error, fetch, setAdmin, setEnabled, resetPassword, remove }
 })

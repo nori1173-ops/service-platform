@@ -2,7 +2,7 @@ import { defineApp } from '../types'
 import { routes } from './routes'
 
 // このディレクトリを frontend/src/apps/{app}/ にコピーし、id / title / icon / order /
-// requiredGroups / nav を書き換える。
+// requiredGroups / nav を書き換える（ADD-APP-GUIDE「8. frontend を追加する」）。
 // 先頭 `_` のディレクトリはレジストリの glob から除外されるため、雛形のままでは配信されない。
 export default defineApp({
   id: 'sample-app',

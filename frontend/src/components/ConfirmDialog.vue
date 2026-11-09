@@ -47,6 +47,8 @@ const emit = defineEmits<{ confirm: [] }>()
         >
           {{ warning }}
         </v-alert>
+        <!-- 文言だけでは足りない補足 (手順の一覧など) -->
+        <slot />
       </v-card-text>
       <v-card-actions>
         <v-spacer />

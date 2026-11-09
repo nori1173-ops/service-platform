@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'
 import * as directives from 'vuetify/directives'
 import { useAuthStore } from '@/stores/auth'
+import { useMeStore, type Me } from '@/stores/me'
 import { useUiStore } from '@/stores/ui'
 import ShellLayout from './ShellLayout.vue'
 
@@ -58,6 +59,7 @@ function createTestRouter(): Router {
     routes: [
       { path: '/', name: 'home', component: StubView },
       { path: '/login', name: 'login', component: StubView },
+      { path: '/account', name: 'account', component: StubView },
       {
         path: '/sample-billing',
         name: 'sample-billing',
@@ -88,14 +90,29 @@ function setWidth(width: number): void {
   Object.defineProperty(window, 'innerWidth', { value: width, writable: true, configurable: true })
 }
 
-async function mountShell(path = '/'): Promise<VueWrapper> {
-  const router = createTestRouter()
+const ACTIVE_ME: Me = {
+  user_id: 'u-1',
+  email: 'user@example.co.jp',
+  status: 'active',
+  kind: 'employee',
+  org_name: null,
+  is_admin: false,
+  admin_state: null,
+  mfa_registered: false,
+  restore_requires: null,
+}
+
+let router: Router
+
+async function mountShell(path = '/', me: Me | null = ACTIVE_ME): Promise<VueWrapper> {
+  router = createTestRouter()
   await router.push(path)
   await router.isReady()
 
   const auth = useAuthStore()
   auth.email = 'user@example.co.jp'
   auth.groups = ['billing']
+  useMeStore().me = me
 
   const vuetify = createVuetify({ components, directives })
   return mount(ShellLayout, { global: { plugins: [pinia, vuetify, router] } })
@@ -191,10 +208,37 @@ describe('ShellLayout', () => {
     expect(tabs).toEqual(['レポート一覧', '設定'])
   })
 
-  it('ログアウトが末尾にある', async () => {
+  // 共用の端末に備え、アカウントとサインアウトを常に出す (ADR D1)
+  it('サイドバーの末尾にアカウントとサインアウトがある', async () => {
     const wrapper = await mountShell()
 
-    expect(navTitles(wrapper).slice(-1)).toEqual(['ログアウト'])
+    expect(navTitles(wrapper).slice(-2)).toEqual(['アカウント', 'サインアウト'])
+  })
+
+  it('アプリバーからアカウントの画面へ行ける', async () => {
+    const wrapper = await mountShell()
+
+    const link = wrapper.find('[data-test="account-link"]')
+    expect(link.attributes('href')).toBe('/account')
+    expect(link.text()).toContain('user@example.co.jp')
+  })
+
+  it('アプリバーのサインアウトでサインインの画面へ戻る', async () => {
+    const wrapper = await mountShell()
+    const logout = vi.spyOn(useAuthStore(), 'logout').mockResolvedValue()
+
+    await wrapper.find('[data-test="appbar-signout"]').trigger('click')
+    await flushPromises()
+
+    expect(logout).toHaveBeenCalled()
+    expect(router.currentRoute.value.name).toBe('login')
+  })
+
+  // 停止中・admin の準備中 / 確認待ちはアカウントの画面だけを使う
+  it('制限中はホームとアプリをサイドバーに出さない', async () => {
+    const wrapper = await mountShell('/', { ...ACTIVE_ME, status: 'suspended' })
+
+    expect(navTitles(wrapper)).toEqual(['アカウント', 'サインアウト'])
   })
 
   // dev サイトと本番サイトの取り違えを防ぐ常時表示（UI-12 / R7）
@@ -207,7 +251,7 @@ describe('ShellLayout', () => {
     expect(chip.classes()).toContain('bg-orange')
   })
 
-  // 画面の語を説明するヘルプ表示
+  // 画面の語の意味が分からないという指摘への対応
   it('？トグルでヘルプモードが反転する', async () => {
     const wrapper = await mountShell('/sample-billing')
     const ui = useUiStore()

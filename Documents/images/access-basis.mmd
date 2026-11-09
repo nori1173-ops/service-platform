@@ -1,0 +1,27 @@
+%%{init: {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "themeVariables": {"fontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "fontSize": "16px"}, "sequence": {"actorFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "messageFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "noteFontFamily": "\"Noto Sans CJK JP\", \"Noto Sans JP\", \"Yu Gothic UI\", Meiryo, sans-serif", "actorFontSize": 16, "messageFontSize": 16, "noteFontSize": 16}, "flowchart": {"htmlLabels": true, "wrappingWidth": 460}}}%%
+flowchart TD
+    req["通信機を伴う要求<br>(台帳の有効な利用者、通信機アカウント)"]
+    p1{{"(1) 稼働中の通信機の利用期間 P"}}
+    subgraph basis["(2) P を扱う根拠 (1 つ以上)"]
+        direction LR
+        a["(a) 本人宛の割り当て<br>今が有効期間内<br>ID = assignment_id"]
+        b["(b) グループ宛の割り当て<br>今が有効期間内<br>本人の所属の経路に<br>そのグループがある<br>ID = assignment_id と<br>所属の membership_id"]
+        c["(c) P の access が everyone<br>(属性が無いときを含む)<br>世代 = access_gen<br>(everyone にするたびに新しい値。<br>属性が無い行は started_at から作る値)<br>assigned のときは見ない"]
+    end
+    any{{"根拠がある"}}
+    login{{"(3) ログイン記録<br>P に属し 12 時間以内<br>記録の根拠 (種類・ID・世代) が<br>(2) の根拠の集合に含まれる<br>(時刻は比べない)"}}
+    grant{{"(4) サービスの許可<br>P に属し期間内"}}
+    ok["処理と監査"]
+    deny2["403 DEVICE_NOT_ASSIGNED<br>((1) と区別しない)"]
+    deny3["403 DEVICE_LOGIN_REQUIRED"]
+    deny4["403 SERVICE_NOT_GRANTED"]
+    req --> p1
+    p1 -->|無い| deny2
+    p1 -->|ある| basis
+    basis --> any
+    any -->|無い| deny2
+    any -->|ある| login
+    login -->|欠ける| deny3
+    login -->|満たす| grant
+    grant -->|無い| deny4
+    grant -->|ある| ok

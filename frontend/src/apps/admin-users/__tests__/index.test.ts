@@ -16,17 +16,33 @@ describe('admin-users のアプリマニフェスト', () => {
     expect(manifest.requiredGroups).toEqual(['admin'])
   })
 
-  it('routes が routes.ts の定義そのもので、遅延ロードの子ルート 1 本', () => {
+  it('routes が routes.ts の定義そのもので、一覧と詳細の遅延ロードの子ルート', () => {
     expect(manifest.routes).toBe(routes)
-    expect(manifest.routes).toHaveLength(1)
-    expect(manifest.routes[0].name).toBe('admin-users.users')
-    expect(manifest.routes[0].path).toBe('')
-    expect(typeof manifest.routes[0].component).toBe('function')
+    expect(manifest.routes.map((route) => [route.name, route.path])).toEqual([
+      ['admin-users.users', ''],
+      ['admin-users.user', 'users/:userId'],
+      ['admin-users.groups', 'groups'],
+      ['admin-users.group', 'groups/:id'],
+      ['admin-users.device-periods', 'device-periods'],
+      ['admin-users.device-period', 'device-periods/:id'],
+    ])
+    for (const route of manifest.routes) {
+      expect(typeof route.component).toBe('function')
+    }
+    expect(manifest.routes[1].props).toBe(true)
   })
 
-  it('nav が /admin-users を指す', () => {
-    expect(manifest.nav).toHaveLength(1)
+  it('nav が /admin-users の利用者の一覧を指す', () => {
+    expect(manifest.nav).toHaveLength(3)
+    expect(manifest.nav[1]).toMatchObject({ to: '/admin-users/groups', title: 'グループ' })
+    expect(manifest.nav[2]).toMatchObject({ to: '/admin-users/device-periods', title: '通信機の利用期間' })
     expect(manifest.nav[0].to).toBe('/admin-users')
+    expect(manifest.nav[0].title).toBe('利用者の一覧')
+  })
+
+  // 呼び名は「利用者」(禁止語を使わない、リポの規約)
+  it('サイドバーの名前は「利用者の管理」', () => {
+    expect(manifest.title).toBe('利用者の管理')
   })
 
   it('サイドバーでは業務アプリより下に並ぶ', () => {

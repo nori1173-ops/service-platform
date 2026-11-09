@@ -14,7 +14,7 @@ from notifier.ses_sender import AttachmentNotFoundError, from_address_from_env, 
 REGION = "ap-northeast-1"
 BUCKET = "service-platform-attachments-dev"
 FROM_ADDRESS = "noreply@service-platform-dev.example-cloud.com"
-SES_MESSAGE_ID = "0100000000000000-11111111-2222-3333-4444-555555555555-000000"
+SES_MESSAGE_ID = "0100000000000000-11111111-2222-3333-4444-210000000001-000000"
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -61,7 +61,7 @@ def make_message(*, email_extra: dict | None = None, attachments: list[dict] | N
     email.update(email_extra or {})
     message: dict = {
         "schema": "service-platform.notify.v1",
-        "message_id": "11111111-2222-3333-4444-555555555555",
+        "message_id": "11111111-2222-3333-4444-210000000001",
         "app": "sample-report",
         "channels": ["email"],
         "email": email,

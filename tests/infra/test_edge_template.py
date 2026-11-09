@@ -1,8 +1,9 @@
 """edge スタックのテンプレート検査。
 
 サイトの入口（S3 + OAC + CloudFront + Route53 + 標準ログ）が設計どおりであることを静的に確かめる。
-CloudFront Function `spa-fallback` は default behavior でディープリンクを `/index.html` へ書き換える
-だけで、IP 制限は持たない。`CustomErrorResponses` の不在は、抜けると JWT の 401/403 が
+CloudFront Function `spa-fallback` は default の behavior でディープリンクを `/index.html`
+へ書き換え、
+IP 制限は持たない（ADR D6）。`CustomErrorResponses` の不在（設計 5.4）は、抜けると JWT の 401/403 が
 200 に化ける種類の項目なので明示的に検査する。
 """
 
@@ -12,14 +13,17 @@ import pytest
 
 TEMPLATE_PATH = "infra/edge/template.yaml"
 SPA_FALLBACK_JS_PATH = "infra/edge/functions/spa-fallback.js"
+DEPLOY_EDGE_PATH = "scripts/deploy-edge.sh"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # アプリ id → edge のパラメータ・条件名に使う PascalCase 名。アプリを足したらここに 1 行足す。
 API_APPS = {
     "admin-users": "AdminUsers",
+    "base": "Base",
 }
 API_PATH_PREFIX = "/api/"
+
 
 CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
@@ -190,9 +194,8 @@ def test_security_headers_policy_sets_a_csp(load_template):
 
     csp = security["ContentSecurityPolicy"]
     assert csp["Override"] is True
-    directives = dict(
-        part.strip().split(" ", 1) for part in csp["ContentSecurityPolicy"]["Fn::Sub"].split(";") if part.strip()
-    )
+    body = csp["ContentSecurityPolicy"]["Fn::Sub"]
+    directives = dict(part.strip().split(" ", 1) for part in body.split(";") if part.strip())
     assert directives == CSP_DIRECTIVES
 
     assert security["ContentTypeOptions"] == {"Override": True}
@@ -285,10 +288,15 @@ def test_bucket_policy_scopes_to_this_distribution(load_template):
     assert source_arn == {"Fn::Sub": "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"}
 
 
-def test_distribution_has_no_web_acl(load_template):
-    """WAF は使わない。"""
+def test_distribution_attaches_the_optional_web_acl(load_template):
     template = _load_or_skip(load_template)
-    assert "WebACLId" not in _distribution_config(template)
+    parameter = template["Parameters"]["WebAclArn"]
+    assert parameter["Type"] == "String"
+    assert parameter["Default"] == ""
+    assert template["Conditions"]["HasWebAcl"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": "WebAclArn"}, ""]}]}
+    assert _distribution_config(template)["WebACLId"] == {
+        "Fn::If": ["HasWebAcl", {"Ref": "WebAclArn"}, {"Ref": "AWS::NoValue"}]
+    }
 
 
 def test_ipv6_is_disabled(load_template):
@@ -321,6 +329,17 @@ def test_api_behaviors_have_no_function_associations(load_template):
         if name != "default" and "FunctionAssociations" in behavior
     }
     assert not offenders, f"関数が付いている API behavior: {offenders}"
+
+
+def test_cloudfront_function_is_a_single_function(load_template):
+    """CloudFront Function は 1 本のまま（DESIGN 17.2 #10 の決め）。default が同じ関数を使う。"""
+    template = _load_or_skip(load_template)
+    functions = [
+        logical_id
+        for logical_id, resource in (template.get("Resources") or {}).items()
+        if resource.get("Type") == "AWS::CloudFront::Function"
+    ]
+    assert functions == ["SpaFallbackFunction"]
 
 
 def test_origin_verify_secret_parameter_is_no_echo(load_template):
@@ -417,4 +436,18 @@ def test_origins_and_behaviors_are_conditional_element_by_element(load_template)
     for name in ("Origins", "CacheBehaviors"):
         assert isinstance(config.get(name), list), f"{name} はリストであること（リスト全体の Fn::If は不可）"
     for behavior in config["CacheBehaviors"]:
-        assert set(behavior) == {"Fn::If"}, "behavior は要素ごとに Fn::If で条件を付けること"
+        assert set(behavior) == {"Fn::If"}, "API の behavior は要素ごとに Fn::If で条件を付けること"
+
+
+@pytest.mark.parametrize("app_id", sorted(API_APPS))
+def test_deploy_edge_resolves_every_api_domain(app_id):
+    """deploy-edge.sh が各アプリの api-domain を SSM から読み、`{App}ApiDomain=` で渡す。
+
+    ADD-APP-GUIDE「7. edge と deploy-edge.sh に 1 組を加える」を参照。
+
+    スクリプトに 1 組を足し忘れると、edge のテンプレートに behavior があっても条件が成り立たず、
+    `/api/{app}/*` が SPA へ落ちる。
+    """
+    script = (REPO_ROOT / DEPLOY_EDGE_PATH).read_text(encoding="utf-8")
+    assert f"/apps/{app_id}/api-domain" in script
+    assert f"{API_APPS[app_id]}ApiDomain=${{" in script

@@ -1,70 +1,54 @@
-"""`pre_signup.app` のテスト。"""
+"""`pre_signup.app` のテスト（ADR-001 D2、計画 3 章）。
+
+招待 (AdminCreateUser) だけを通し、自己登録 (SignUp) と外部の IdP からの作成を拒む。
+メールアドレスのドメインでは判定しない（お客様を招待するため）。
+"""
+
+import copy
 
 import pytest
 from pre_signup.app import handler
 
 
-def make_event(email: str | None) -> dict:
-    """Cognito PreSignUp トリガーのイベントを組む。`email=None` で属性そのものを欠落させる。"""
-    user_attributes = {} if email is None else {"email": email}
-    return {
-        "request": {"userAttributes": user_attributes},
-        "response": {},
-    }
+def make_event(trigger_source: str | None, email: str = "someone@example.com") -> dict:
+    event = {"request": {"userAttributes": {"email": email}}, "response": {}}
+    if trigger_source is not None:
+        event["triggerSource"] = trigger_source
+    return event
 
 
-def test_allows_example_domain():
-    event = make_event("devA@example.co.jp")
+def test_allows_admin_create_user():
+    event = make_event("PreSignUp_AdminCreateUser")
 
     assert handler(event, None) == event
 
 
-def test_allows_uppercase_domain():
-    event = make_event("devA@EXAMPLE.CO.JP")
+@pytest.mark.parametrize("email", ["customer@example.com", "devA@example.co.jp", "a@mail.example.jp"])
+def test_allows_invitations_to_any_domain(email):
+    event = make_event("PreSignUp_AdminCreateUser", email)
 
     assert handler(event, None) == event
 
 
-def test_rejects_external_domain():
-    with pytest.raises(Exception, match="example.co.jp"):
-        handler(make_event("someone@example.net"), None)
+def test_does_not_auto_confirm_or_verify():
+    """招待の検証済みは AdminCreateUser の `email_verified=true` で付ける。トリガーは応答を変えない。"""
+    event = make_event("PreSignUp_AdminCreateUser")
+    before = copy.deepcopy(event)
+
+    assert handler(event, None)["response"] == before["response"]
 
 
-def test_rejects_lookalike_domain(monkeypatch):
-    monkeypatch.setattr("pre_signup.app.ALLOWED_DOMAIN", "example.test")
-    with pytest.raises(Exception, match="example.test"):
-        handler(make_event("a@fake-example.test"), None)
+def test_rejects_self_sign_up():
+    with pytest.raises(Exception, match="sign-up"):
+        handler(make_event("PreSignUp_SignUp"), None)
 
 
-def test_rejects_missing_email():
-    with pytest.raises(Exception, match="email"):
-        handler(make_event(None), None)
+def test_rejects_external_provider():
+    with pytest.raises(Exception, match="sign-up"):
+        handler(make_event("PreSignUp_ExternalProvider"), None)
 
 
-def test_rejects_email_without_at():
-    with pytest.raises(Exception, match="format"):
-        handler(make_event("noatmark"), None)
-
-
-def test_rejects_multiple_at_marks():
-    """`a@attacker.example.net@example.co.jp` のような多重 `@` を弾く。"""
-    with pytest.raises(Exception, match="format"):
-        handler(make_event("a@attacker.example.net@example.co.jp"), None)
-
-
-def test_allows_surrounding_whitespace_and_uppercase():
-    """前後空白と大文字は正規化してから判定する。"""
-    event = make_event(" devA@EXAMPLE.CO.JP ")
-
-    assert handler(event, None) == event
-
-
-def test_rejects_domain_with_suffix():
-    """`example.co.jp` で始まるだけのドメインを弾く。"""
-    with pytest.raises(Exception, match="example.co.jp"):
-        handler(make_event("a@example.co.jp.attacker.example.net"), None)
-
-
-def test_rejects_subdomain():
-    with pytest.raises(Exception, match="example.co.jp"):
-        handler(make_event("a@mail.example.co.jp"), None)
+@pytest.mark.parametrize("trigger_source", [None, "", "PreSignUp_adminCreateUser"])
+def test_rejects_unknown_trigger_sources(trigger_source):
+    with pytest.raises(Exception, match="sign-up"):
+        handler(make_event(trigger_source), None)

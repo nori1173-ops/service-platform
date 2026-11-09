@@ -9,6 +9,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 TEMPLATES: list[str] = [
     "shared/template.yaml",
     "infra/core/template.yaml",
+    "infra/waf/template.yaml",
     "infra/edge/template.yaml",
     *sorted(p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "apps").glob("*/template.yaml")),
 ]
@@ -28,12 +29,15 @@ ALLOWED_NAME_VALUES = frozenset(
         "Layer",
         "StateMachine",
         "Schedule",
+        "ScheduleGroup",  # AWS::Scheduler::ScheduleGroup。設計 14.2 への追記を要提案
         "Topic",  # AWS::SNS::Topic
         "Alarm",  # AWS::CloudWatch::Alarm
         "ConfigurationSet",  # AWS::SES::ConfigurationSet
         "EventSourceMapping",  # AWS::Lambda::EventSourceMapping
         "EmailIdentity",  # AWS::SES::EmailIdentity
         "Rule",  # AWS::Events::Rule
+        # ユーザープールの web ACL (。設計 14.2 の表への追記を要提案)
+        "WebAcl",  # AWS::WAFv2::WebACL
     }
 )
 
@@ -50,8 +54,15 @@ UNTAGGABLE_TYPES = frozenset(
         "AWS::Cognito::UserPoolGroup",
         "AWS::SES::ConfigurationSetEventDestination",
         "AWS::SNS::TopicPolicy",
+        # cfn-lint 1.59.0 のプロバイダスキーマで Tags 非対応を確認
+        "AWS::SNS::Subscription",
+        "AWS::SQS::QueuePolicy",
         "AWS::IAM::Policy",
         "AWS::Serverless::LayerVersion",
+        "AWS::WAFv2::WebACLAssociation",
+        "AWS::WAFv2::LoggingConfiguration",
+        # AWS 公式仕様で Tags 非対応。所属する ScheduleGroup にタグを付ける
+        "AWS::Scheduler::Schedule",
         # タグ対応だが Tags は任意。契約パラメータにタグを付けない方針のため検査対象外
         "AWS::SSM::Parameter",
     }
@@ -191,6 +202,7 @@ def _tag_list(name: str) -> list[dict]:
         ("AWS::SES::EmailIdentity", "EmailIdentity"),
         ("AWS::CloudFront::Function", "EdgeFunction"),
         ("AWS::Events::Rule", "Rule"),
+        ("AWS::WAFv2::WebACL", "WebAcl"),
     ],
 )
 def test_types_with_tags_support_are_not_excluded(resource_type, name_value):

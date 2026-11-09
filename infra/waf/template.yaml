@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: service-platform waf - CloudFront 用 web ACL / ログ / us-east-1 の SSM
+
+# CloudFront 用 web ACL は us-east-1 に配備する。edge は deploy-edge.sh で ARN を受け取る。
+Parameters:
+  ProjectName:
+    Type: String
+    Default: service-platform
+  Env:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+
+Resources:
+  CloudFrontWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${ProjectName}-cf-${Env}
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-cf-${Env}
+      Rules:
+        - Name: rate-per-ip
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-per-ip
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: WebAcl
+
+  CloudFrontWebAclLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub aws-waf-logs-${ProjectName}-cf-${Env}
+      RetentionInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: LogGroup
+
+  CloudFrontWebAclLogging:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt CloudFrontWebAcl.Arn
+      # WAF は GetAtt の Arn (末尾 :*) を受け付けないので組み立てる
+      LogDestinationConfigs:
+        - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CloudFrontWebAclLogGroup}
+      LoggingFilter:
+        DefaultBehavior: DROP
+        Filters:
+          - Behavior: KEEP
+            Requirement: MEETS_ANY
+            Conditions:
+              - ActionCondition:
+                  Action: BLOCK
+              - ActionCondition:
+                  Action: COUNT
+
+  CloudFrontWebAclArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${ProjectName}/${Env}/waf/cloudfront-web-acl-arn
+      Type: String
+      Value: !GetAtt CloudFrontWebAcl.Arn
+      Description: CloudFront 用 web ACL の ARN。deploy-edge.sh が us-east-1 で読む
+
+Outputs:
+  WebAclArn:
+    Description: CloudFront 用 web ACL の ARN
+    Value: !GetAtt CloudFrontWebAcl.Arn

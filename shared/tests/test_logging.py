@@ -61,3 +61,19 @@ def test_boto_logger_is_clamped_even_when_root_is_debug(monkeypatch):
     finally:
         root.setLevel(original[0])
         botocore.setLevel(original[1])
+
+
+def test_boto_logger_stays_clamped_when_root_turns_debug_later():
+    """get_logger の後で root が DEBUG になっても botocore は INFO 以上 (要求の本文に一時パスワードが載るため)。"""
+    root = std_logging.getLogger()
+    botocore = std_logging.getLogger("botocore")
+    original = (root.level, botocore.level)
+    botocore.setLevel(std_logging.NOTSET)
+    try:
+        get_logger()
+        root.setLevel(std_logging.DEBUG)
+
+        assert botocore.getEffectiveLevel() >= std_logging.INFO
+    finally:
+        root.setLevel(original[0])
+        botocore.setLevel(original[1])

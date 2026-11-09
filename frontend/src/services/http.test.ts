@@ -4,9 +4,26 @@ import { createPinia, setActivePinia } from 'pinia'
 import { fetchAuthSession, getCurrentUser, signOut } from 'aws-amplify/auth'
 import router from '@/router'
 import { useAuthStore } from '@/stores/auth'
+import { useMeStore } from '@/stores/me'
 import { createAppApi, extractApiError } from './http'
 
 vi.mock('aws-amplify/utils', () => ({ Hub: { listen: vi.fn() } }))
+
+vi.mock('@/services/baseApi', () => ({
+  baseApi: {
+    getMe: vi.fn(async () => ({
+      user_id: 'u-1',
+      email: 'user@example.com',
+      status: 'active',
+      kind: 'customer',
+      org_name: null,
+      is_admin: false,
+      admin_state: null,
+      mfa_registered: false,
+    })),
+    registerTotp: vi.fn(),
+  },
+}))
 
 // 実ガードを載せたルーターを @/router の代わりに使い、401 → ストア未認証化 → /login
 // 到達までの継ぎ目をそのまま検証する（push のスパイだけではガードを通らない）
@@ -19,6 +36,7 @@ vi.mock('@/router', async () => {
     routes: [
       { path: '/login', name: 'login', component: Stub, meta: { requiresAuth: false } },
       { path: '/', name: 'home', component: Stub },
+      { path: '/account', name: 'account', component: Stub },
       { path: '/billing/settings', name: 'billing-settings', component: Stub },
     ],
   })
@@ -27,7 +45,7 @@ vi.mock('@/router', async () => {
 })
 
 const APP_ID = 'sample-report'
-const EMAIL = 'user@example.co.jp'
+const EMAIL = 'user@example.com'
 
 function signedIn(idToken: string | null = 'id-token-1'): void {
   vi.mocked(getCurrentUser).mockResolvedValue({
@@ -65,10 +83,14 @@ function failWith(api: AxiosInstance, status: number, data: unknown = {}): void 
   api.defaults.adapter = adapter
 }
 
+function envelope(code: string, message = code): unknown {
+  return { ok: false, data: null, error: { code, message }, meta: null }
+}
+
 describe('createAppApi', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    vi.resetAllMocks()
+    vi.clearAllMocks()
     signedIn()
   })
 
@@ -98,10 +120,14 @@ describe('createAppApi', () => {
     expect(captured[0].headers.Authorization).toBeUndefined()
   })
 
-  it('401 応答で signOut が呼ばれ /login へ遷移する', async () => {
+  // JWT authorizer の 401 はエンベロープを持たない。401 だけをサインアウトの合図にする (計画 2.6)
+  it.each([
+    ['JWT authorizer の 401', { message: 'Unauthorized' }],
+    ['エンベロープの UNAUTHORIZED', envelope('UNAUTHORIZED')],
+  ])('%s で signOut が呼ばれ /login へ遷移する', async (_label, data) => {
     await startAtBillingSettings()
     const api = createAppApi(APP_ID)
-    failWith(api, 401)
+    failWith(api, 401, data)
 
     await expect(api.get('/invoices')).rejects.toThrow('Request failed with status code 401')
 
@@ -122,7 +148,58 @@ describe('createAppApi', () => {
     expect(router.currentRoute.value.name).not.toBe('home')
   })
 
-  it('401 以外はそのまま reject される', async () => {
+  it.each([
+    'USER_SUSPENDED',
+    'USER_NOT_REGISTERED',
+    'ADMIN_NOT_ACTIVE',
+    'ADMIN_SESSION_STALE',
+    'ADMIN_MFA_MISSING',
+  ])('403 %s はサインアウトせず理由を控えて /account へ移る', async (code) => {
+    await startAtBillingSettings()
+    const api = createAppApi(APP_ID)
+    failWith(api, 403, envelope(code))
+
+    await expect(api.get('/invoices')).rejects.toThrow('Request failed with status code 403')
+
+    expect(signOut).not.toHaveBeenCalled()
+    expect(useMeStore().denied).toBe(code)
+    expect(router.currentRoute.value.name).toBe('account')
+  })
+
+  it('403 で移った後は me を読み直す', async () => {
+    await startAtBillingSettings()
+    const me = useMeStore()
+    const load = vi.spyOn(me, 'load')
+    const api = createAppApi(APP_ID)
+    failWith(api, 403, envelope('USER_SUSPENDED'))
+
+    await expect(api.get('/invoices')).rejects.toThrow()
+
+    expect(load).toHaveBeenCalled()
+  })
+
+  it('業務の 403 (自分自身の操作など) は移動しない', async () => {
+    await startAtBillingSettings()
+    const api = createAppApi(APP_ID)
+    failWith(api, 403, envelope('SELF_OPERATION_FORBIDDEN'))
+
+    await expect(api.get('/invoices')).rejects.toThrow()
+
+    expect(useMeStore().denied).toBeNull()
+    expect(router.currentRoute.value.name).toBe('billing-settings')
+  })
+
+  it('redirectOnDenied: false なら 403 でも移動しない', async () => {
+    await startAtBillingSettings()
+    const api = createAppApi('base', { redirectOnDenied: false })
+    failWith(api, 403, envelope('USER_SUSPENDED'))
+
+    await expect(api.get('/me')).rejects.toThrow()
+
+    expect(router.currentRoute.value.name).toBe('billing-settings')
+  })
+
+  it('401・403 以外はそのまま reject される', async () => {
     await startAtBillingSettings()
     const api = createAppApi(APP_ID)
     failWith(api, 500)

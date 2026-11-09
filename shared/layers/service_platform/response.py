@@ -7,13 +7,14 @@ from aws_lambda_powertools.event_handler import Response
 from aws_lambda_powertools.event_handler.api_gateway import ApiGatewayResolver
 from aws_lambda_powertools.event_handler.exceptions import NotFoundError
 
-from service_platform.auth import ForbiddenError, UnauthorizedError
+from service_platform.auth import ForbiddenError, TooManyRequestsError, UnauthorizedError
 
 CONTENT_TYPE_JSON = "application/json"
 
 UNAUTHORIZED_MESSAGE = "認証が必要です"
 FORBIDDEN_MESSAGE = "権限がありません"
 NOT_FOUND_MESSAGE = "エンドポイントが見つかりません"
+TOO_MANY_REQUESTS_MESSAGE = "しばらく時間をおいてから操作してください"
 
 
 def ok(data: Any, meta: dict | None = None) -> dict:
@@ -43,6 +44,9 @@ def error(code: str, message: str, status: int = 400) -> Response:
 def install_error_handlers(app: ApiGatewayResolver) -> None:
     """認証・存在しないルートの例外をエンベロープに変換するハンドラを resolver に登録する。
 
+    403 と 429 は例外の `code` 属性 (shared の identity / admin_guard の `USER_SUSPENDED` など) を
+    エンベロープの code にする。属性が無い `ForbiddenError` は `FORBIDDEN`。
+
     登録しないと Powertools 既定の `{"statusCode": ..., "message": ...}` が返り、
     アプリごとに 403 / 404 のレスポンス形が食い違う。想定外の例外は
     登録しない（握り潰さず Lambda のエラーとして上げ、アラームに載せる）。
@@ -54,7 +58,11 @@ def install_error_handlers(app: ApiGatewayResolver) -> None:
 
     @app.exception_handler(ForbiddenError)
     def _forbidden(exc: ForbiddenError) -> Response:
-        return error("FORBIDDEN", str(exc) or FORBIDDEN_MESSAGE, 403)
+        return error(getattr(exc, "code", "FORBIDDEN"), str(exc) or FORBIDDEN_MESSAGE, 403)
+
+    @app.exception_handler(TooManyRequestsError)
+    def _too_many_requests(exc: TooManyRequestsError) -> Response:
+        return error(exc.code, str(exc) or TOO_MANY_REQUESTS_MESSAGE, 429)
 
     @app.exception_handler(NotFoundError)
     def _not_found(exc: NotFoundError) -> Response:

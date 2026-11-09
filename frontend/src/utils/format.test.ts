@@ -5,11 +5,19 @@ import {
   formatDate,
   formatDateTime,
   formatDateTimeSeconds,
+  formatJst,
   formatYen,
   toWallClock,
 } from './format'
 
 describe('format', () => {
+  // API は UTC の ISO 8601 (`Z`) を返す。画面は日本時間で出す
+  it('UTC の日時を JST の YYYY-MM-DD HH:mm にする', () => {
+    expect(formatJst('2026-11-04T15:30:00Z')).toBe('2026-11-05 00:30')
+    expect(formatJst(null)).toBe(DASH)
+    expect(formatJst('not a date')).toBe('not a date')
+  })
+
   it('日時を JST の YYYY-MM-DD HH:mm にする', () => {
     expect(formatDateTime('2026-08-31T23:50:00+09:00')).toBe('2026-08-31 23:50')
   })

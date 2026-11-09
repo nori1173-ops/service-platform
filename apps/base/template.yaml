@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: service-platform app base - 土台の HTTP API / api Lambda と apps/base の SSM パラメータ
+
+# 前提: shared → core の順に配備済みであること（設計 3.3）。
+# SSM 型パラメータの Default は dev のキー名。prod は samconfig の [production.deploy.parameters] で
+# キー名（値ではない）を上書きする（設計 4.4）。
+#
+# 利用者本人が呼ぶ API (自分の状態、admin の TOTP の登録を終えた、通信機ログイン、サービスの一覧) を置く
+# （計画の判断 2）。自前のテーブルは持たず、core の台帳と監査を使う。IAM は今使う操作だけに絞る。
+# 権限を足すときは tests/infra/test_base_template.py を先に直す。
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: service-platform
+  Env:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+  LogLevel:
+    Type: String
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+    Default: INFO
+  ExamplePowertoolsLayerArn:
+    Type: String
+    Default: arn:aws:lambda:ap-northeast-1:210000000001:layer:ExamplePowertoolsPython:1
+    Description: 社内レイヤ ExamplePowertoolsPython の ARN。LambdaLogger のために参照する
+  PowertoolsLayerArn:
+    Type: String
+    Description: AWS 提供の Powertools for AWS Lambda (Python) レイヤ ARN。samconfig で環境ごとに指定する
+  UserPoolIssuer:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/cognito/issuer
+    Description: JWT authorizer が検証する issuer（設計 4.2）
+  UserPoolClientId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/cognito/client-id
+    Description: JWT authorizer の audience（設計 4.2）
+  UserPoolId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/cognito/user-pool-id
+    Description: User Pool ID（設計 4.2）。IAM の Resource と環境変数 USER_POOL_ID に使う
+  SharedLayerArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/shared/layer-arn
+    Description: 共通レイヤ service_platform のバージョン付き ARN
+  LedgerTableName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/ledger/table-name
+    Description: 台帳のテーブル名（設計 4.2）。環境変数 LEDGER_TABLE と IAM の Resource に使う
+  AuditTableName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service-platform/dev/audit/table-name
+    Description: 監査のテーブル名（設計 4.2）。環境変数 AUDIT_TABLE と IAM の Resource に使う
+  DeviceBackendApiBaseUrl:
+    Type: String
+    Default: https://placeholder.invalid
+    Description: device-backend の origin（計画 2.5。秘密ではない）。未設定は届かない既定値で失敗させる
+  # 画像基盤が無い環境でも立つよう、SSM の型パラメータにせず、キーの名前を受けて実行時に読む（判断 4）。
+  # 空ならデバイス活動台帳を読まず、最新値の取得は常に不可（fail-closed）。
+  DeviceActivityTableNameParameter:
+    Type: String
+    Default: /service-platform/dev/devices/activity-table-name
+    Description: 外部のデバイス活動台帳の表の名前を持つ SSM のキー（設計 4.2）。空なら最新値の取得は不可
+
+Conditions:
+  HasDeviceActivityTable: !Not [!Equals [!Ref DeviceActivityTableNameParameter, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    MemorySize: 256
+    Timeout: 30
+    PropagateTags: true
+    Environment:
+      Variables:
+        ENV: !Ref Env
+        LOG_LEVEL: !Ref LogLevel
+        USER_POOL_ID: !Ref UserPoolId
+        LEDGER_TABLE: !Ref LedgerTableName
+        AUDIT_TABLE: !Ref AuditTableName
+        DEVICE_BACKEND_API_BASE_URL: !Ref DeviceBackendApiBaseUrl
+        DEVICE_ACTIVITY_TABLE_PARAMETER: !Ref DeviceActivityTableNameParameter
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
+      # 通信機ログインはルート単位で絞る（総当たり対策の重ね。ADR D9）。ルートは ApiFunction の DeviceLogin
+      RouteSettings:
+        "POST /api/base/devices/login":
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      Auth:
+        Authorizers:
+          CognitoJwtAuthorizer:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Ref UserPoolIssuer
+              audience:
+                - !Ref UserPoolClientId
+        DefaultAuthorizer: CognitoJwtAuthorizer
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","sub":"$context.authorizer.claims.sub","latency":"$context.responseLatency"}'
+      Tags:
+        Project: !Ref ProjectName
+        Name: Api
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${ProjectName}-base-${Env}
+      RetentionInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: LogGroup
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-base-api-${Env}
+      Description: 土台の HTTP API ハンドラ
+      CodeUri: functions/
+      Handler: base_api.app.handler
+      Layers:
+        - !Ref SharedLayerArn
+        - !Ref ExamplePowertoolsLayerArn
+        - !Ref PowertoolsLayerArn
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: base-api
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/base/{proxy+}
+            Method: ANY
+        # ルート単位のスロットリングを付けるための専用ルート（HttpApi の RouteSettings）
+        DeviceLogin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/base/devices/login
+            Method: POST
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            # 本人の TOTP の確認と全セッションの失効だけ。自環境の User Pool 1 つに限る（設計 12.2）
+            - Sid: ReadSetMfaAndSignOutInOwnUserPool
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminListGroupsForUser
+                - cognito-idp:AdminUserGlobalSignOut
+                - cognito-idp:AdminSetUserMFAPreference
+              Resource: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+            # 認可の読み取り (強い整合の GetItem / Query。GSI は使わない) と、base が書く行 (自分の行、ログイン記録、
+            # 失敗回数、最新値の受付、割り当ての製造番号)。台帳と監査は同じトランザクションで書く。
+            # ConditionCheckItem はログイン記録を割り当てと利用期間の確認と同じトランザクションで書くため
+            - Sid: ReadAndWriteLedger
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:ConditionCheckItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LedgerTableName}
+            # 通信機ログインの一覧 (/me/devices) だけ: 稼働中の利用期間の指しの写し (GSI1 の DEVICE。結果整合)。
+            # 認可の判断には使わない (ADR D14)
+            - Sid: QueryLedgerIndex
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LedgerTableName}/index/GSI1
+            # 最新値のガード: 外部のデバイス活動台帳を読み取りだけで引く（判断 4）。表の名前は命名の規約で決まる
+            - !If
+              - HasDeviceActivityTable
+              - Sid: QueryDeviceActivityLedger
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}-device-activity-${Env}
+              - !Ref AWS::NoValue
+            - !If
+              - HasDeviceActivityTable
+              - Sid: ReadDeviceActivityLedgerName
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DeviceActivityTableNameParameter}
+              - !Ref AWS::NoValue
+            # 監査は追記だけ（ADR D12）
+            - Sid: AppendAudit
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AuditTableName}
+            - Sid: ReadOriginVerifyParameter
+              Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Env}/edge/origin-verify-secret
+            - Sid: DecryptSecureStringParameters
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+                ForAnyValue:StringEquals:
+                  kms:ResourceAliases: alias/aws/ssm
+      Tags:
+        Project: !Ref ProjectName
+        Name: Function
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: 365
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: LogGroup
+
+  ApiWarmerScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub ${ProjectName}-base-warmer-${Env}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: ScheduleGroup
+
+  ApiWarmerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !GetAtt ApiWarmerScheduleGroup.Arn
+      Policies:
+        - PolicyName: InvokeBaseApi
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ApiFunction.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: Role
+
+  ApiWarmerSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: ApiLogGroup
+    Properties:
+      Name: !Sub ${ProjectName}-base-warmer-${Env}
+      GroupName: !Ref ApiWarmerScheduleGroup
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ApiFunction.Arn
+        RoleArn: !GetAtt ApiWarmerRole.Arn
+        Input: '{"warmer":true,"slot":0}'
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 60
+          MaximumRetryAttempts: 0
+
+  ApiDomainParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${ProjectName}/${Env}/apps/base/api-domain
+      Type: String
+      Value: !Sub ${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+      Description: HTTP API のドメイン。edge が origin の DomainName として読む（設計 4.2）
+
+Outputs:
+  ApiDomain:
+    Description: HTTP API のドメイン（edge の origin DomainName）
+    Value: !Sub ${HttpApi}.execute-api.${AWS::Region}.amazonaws.com

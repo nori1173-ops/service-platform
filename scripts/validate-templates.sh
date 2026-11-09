@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATES=(
   "shared"
   "infra/core"
+  "infra/waf"
   "infra/edge"
 )
 
@@ -24,11 +25,16 @@ for t in "${TEMPLATES[@]}"; do
   fi
   found=$((found + 1))
 
+  region="ap-northeast-1"
+  if [ "$t" = "infra/waf" ]; then
+    region="us-east-1"
+  fi
+
   echo "=== sam validate: $t ==="
-  ( cd "$dir" && sam validate ) || rc=1
+  ( cd "$dir" && sam validate --region "$region" ) || rc=1
 
   echo "=== cfn-lint: $t ==="
-  ( cd "$ROOT" && uv run cfn-lint "$dir/template.yaml" --regions ap-northeast-1 ) || rc=1
+  ( cd "$ROOT" && uv run cfn-lint "$dir/template.yaml" --regions "$region" ) || rc=1
 done
 
 if [ "$found" -eq 0 ]; then

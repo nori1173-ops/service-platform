@@ -1,4 +1,4 @@
-# infra/edge/template.yaml に転記する断片。
+# infra/edge/template.yaml に転記する断片（ADD-APP-GUIDE「7. edge と deploy-edge.sh に 1 組を加える」 / 設計 5.2）。
 # admin-users は転記済みなので、下は edge テンプレートに入っている実物の写し。
 #
 # scripts/deploy-edge.sh も追記済み（ADMIN_USERS_API_DOMAIN_PARAM の解決と OVERRIDES への連結）。

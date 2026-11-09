@@ -21,6 +21,12 @@ class ForbiddenError(Exception):
     """認証済みだが権限が足りない（403）。"""
 
 
+class TooManyRequestsError(Exception):
+    """回数の上限に当たった（429）。子クラスが `code` を持つ。"""
+
+    code = "TOO_MANY_REQUESTS"
+
+
 @dataclass(frozen=True)
 class Claims:
     """ID トークンから取り出した呼び出し元の情報。"""
